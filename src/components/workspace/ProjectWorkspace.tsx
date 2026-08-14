@@ -3,8 +3,9 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { AnimatePresence, motion } from "framer-motion";
-import { ProjectBundle } from "@/lib/types";
-import StepBasics from "./StepBasics";
+import { formatDistanceToNow } from "date-fns";
+import { ProjectBundle, ProjectDirectoryMatch } from "@/lib/types";
+import StepBasics, { AutofillStatus } from "./StepBasics";
 import StepUnitTypes from "./StepUnitTypes";
 import StepPaymentPlan from "./StepPaymentPlan";
 import StepComparables from "./StepComparables";
@@ -35,8 +36,73 @@ export default function ProjectWorkspace({
   const [savedAt, setSavedAt] = useState<Date | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [direction, setDirection] = useState(1);
+  const [autofillStatus, setAutofillStatus] = useState<AutofillStatus>("idle");
+  const [autofillNote, setAutofillNote] = useState<string | null>(null);
 
   const StepIcon = STEPS[stepIdx].icon;
+
+  async function handleAutofill() {
+    const name = bundle.project.name.trim();
+    if (!name) return;
+    setAutofillStatus("loading");
+    try {
+      const res = await fetch(`/api/project-directory/lookup?name=${encodeURIComponent(name)}`);
+      const data: { match: ProjectDirectoryMatch | null } = await res.json();
+      if (data.match) {
+        const m = data.match;
+        setBundle((prev) => ({
+          ...prev,
+          project: {
+            ...prev.project,
+            developer: m.developer || prev.project.developer,
+            area: m.area || prev.project.area,
+            subLocation: m.subLocation || prev.project.subLocation,
+            description: m.description || prev.project.description,
+            status: m.status || prev.project.status,
+            reraNumber: m.reraNumber || prev.project.reraNumber,
+            escrowBank: m.escrowBank || prev.project.escrowBank,
+            handoverDate: m.handoverDate ?? prev.project.handoverDate,
+            launchDate: m.launchDate ?? prev.project.launchDate,
+            totalUnits: m.totalUnits ?? prev.project.totalUnits,
+            amenities: m.amenities.length ? m.amenities : prev.project.amenities,
+            currency: m.currency || prev.project.currency,
+            goldenVisaEligible: m.goldenVisaEligible,
+            heroImageDataUrl: prev.project.heroImageDataUrl ?? m.heroImageDataUrl,
+          },
+          // Only fill unit types / comparables if the agent hasn't already
+          // started entering their own — never clobber real work in progress.
+          unitTypes: prev.unitTypes.length
+            ? prev.unitTypes
+            : m.unitTypes.map((u, idx) => ({
+                ...u,
+                id: crypto.randomUUID(),
+                projectId: "",
+                sortOrder: idx,
+              })),
+          comparableProjects: prev.comparableProjects.length
+            ? prev.comparableProjects
+            : m.comparableProjects.map((c, idx) => ({
+                ...c,
+                id: crypto.randomUUID(),
+                projectId: "",
+                sortOrder: idx,
+              })),
+        }));
+        setAutofillNote(
+          `Last updated ${formatDistanceToNow(new Date(m.updatedAt), { addSuffix: true })} — please verify pricing before sending to a client.`
+        );
+        setAutofillStatus("found");
+      } else {
+        setAutofillNote(null);
+        setAutofillStatus("not-found");
+      }
+    } catch {
+      setAutofillNote(null);
+      setAutofillStatus("not-found");
+    } finally {
+      setTimeout(() => setAutofillStatus("idle"), 6000);
+    }
+  }
 
   function goTo(idx: number) {
     setDirection(idx > stepIdx ? 1 : -1);
@@ -168,7 +234,13 @@ export default function ProjectWorkspace({
               transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
             >
               {stepIdx === 0 && (
-                <StepBasics project={bundle.project} onChange={(patch) => setBundle({ ...bundle, project: { ...bundle.project, ...patch } })} />
+                <StepBasics
+                  project={bundle.project}
+                  onChange={(patch) => setBundle({ ...bundle, project: { ...bundle.project, ...patch } })}
+                  onAutofill={handleAutofill}
+                  autofillStatus={autofillStatus}
+                  autofillNote={autofillNote}
+                />
               )}
               {stepIdx === 1 && (
                 <StepUnitTypes unitTypes={bundle.unitTypes} onChange={(unitTypes) => setBundle({ ...bundle, unitTypes })} />

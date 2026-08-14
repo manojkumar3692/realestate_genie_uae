@@ -114,3 +114,28 @@ export interface ReportClientInfo {
   clientEmail: string;
   focusUnitTypeId: string | null;
 }
+
+// Result of a project directory lookup (see src/db/schema.ts projectDirectory) —
+// project basics plus reusable unit types / comparables, without ids or
+// projectId since those get freshly generated for whichever project adopts them.
+export interface ProjectDirectoryMatch {
+  name: string;
+  developer: string;
+  area: string;
+  subLocation: string;
+  description: string;
+  status: ProjectStatus;
+  reraNumber: string;
+  escrowBank: string;
+  handoverDate: string | null;
+  launchDate: string | null;
+  totalUnits: number | null;
+  amenities: string[];
+  currency: string;
+  goldenVisaEligible: boolean;
+  heroImageDataUrl: string | null;
+  unitTypes: Omit<UnitTypeInput, "id" | "projectId" | "sortOrder">[];
+  comparableProjects: Omit<ComparableProjectInput, "id" | "projectId" | "sortOrder">[];
+  /** ISO timestamp this directory entry was last saved from — show agents how fresh it is. */
+  updatedAt: string;
+}

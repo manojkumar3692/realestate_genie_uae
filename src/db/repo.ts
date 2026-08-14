@@ -7,6 +7,7 @@ import {
   firmSettings,
   generatedReports,
   paymentMilestones,
+  projectDirectory,
   projects,
   unitTypes,
 } from "./schema";
@@ -16,6 +17,7 @@ import type {
   FirmSettingsInput,
   PaymentMilestoneInput,
   ProjectBundle,
+  ProjectDirectoryMatch,
   ProjectInput,
   UnitTypeInput,
 } from "@/lib/types";
@@ -208,7 +210,155 @@ export async function saveProjectBundle(id: string, input: ProjectBundleWriteInp
     }
   });
 
-  return (await getProjectBundle(id))!;
+  const bundle = (await getProjectBundle(id))!;
+
+  // Grow the shared project directory from this save. Never let this block
+  // or fail the actual save — it's a nice-to-have, not core to the product.
+  upsertProjectDirectoryFromBundle(bundle).catch((err) => {
+    console.error("Failed to upsert project directory entry:", err);
+  });
+
+  return bundle;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Project directory (shared, growing library of project facts)               */
+/* -------------------------------------------------------------------------- */
+
+function normalizeProjectName(name: string): string {
+  return name.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+async function upsertProjectDirectoryFromBundle(bundle: ProjectBundle) {
+  const name = bundle.project.name?.trim();
+  if (!name) return; // skip untitled/blank projects — nothing useful to store
+  const nameNormalized = normalizeProjectName(name);
+  const now = new Date().toISOString();
+
+  const unitTypesJson = JSON.stringify(
+    bundle.unitTypes.map((u) => ({
+      typeLabel: u.typeLabel,
+      sizeSqftMin: u.sizeSqftMin,
+      sizeSqftMax: u.sizeSqftMax,
+      priceFrom: u.priceFrom,
+      priceTo: u.priceTo,
+      representativePrice: u.representativePrice,
+      serviceChargePerSqft: u.serviceChargePerSqft,
+    }))
+  );
+  const comparableProjectsJson = JSON.stringify(
+    bundle.comparableProjects.map((c) => ({
+      name: c.name,
+      area: c.area,
+      distanceKm: c.distanceKm,
+      priceHistory: c.priceHistory,
+      notes: c.notes,
+    }))
+  );
+
+  const values = {
+    name,
+    developer: bundle.project.developer,
+    area: bundle.project.area,
+    subLocation: bundle.project.subLocation,
+    description: bundle.project.description,
+    status: bundle.project.status,
+    reraNumber: bundle.project.reraNumber,
+    escrowBank: bundle.project.escrowBank,
+    handoverDate: bundle.project.handoverDate,
+    launchDate: bundle.project.launchDate,
+    totalUnits: bundle.project.totalUnits,
+    amenities: JSON.stringify(bundle.project.amenities ?? []),
+    currency: bundle.project.currency,
+    goldenVisaEligible: bundle.project.goldenVisaEligible,
+    unitTypesJson,
+    comparableProjectsJson,
+    updatedAt: now,
+  };
+
+  await db
+    .insert(projectDirectory)
+    .values({ id: randomUUID(), nameNormalized, createdAt: now, heroImageDataUrl: bundle.project.heroImageDataUrl, ...values })
+    .onConflictDoUpdate({ target: projectDirectory.nameNormalized, set: values });
+
+  // Hero image handled separately from the rest of `values`: only ever set it
+  // when this save actually has one, so a later save that doesn't touch the
+  // image (or was made before an image existed) never blanks out a good one
+  // a previous agent already contributed.
+  if (bundle.project.heroImageDataUrl) {
+    await sql`UPDATE project_directory SET hero_image_data_url = ${bundle.project.heroImageDataUrl} WHERE name_normalized = ${nameNormalized}`;
+  }
+}
+
+/**
+ * Looks up the project directory for a name an agent just typed. Tries an
+ * exact normalized match first, then falls back to a partial match in either
+ * direction (typed name is a substring of a stored name, or vice versa) so
+ * "Marina Horizon" still finds "Marina Horizon Residences". Increments the
+ * matched entry's usage count. Returns null if nothing matches.
+ */
+interface ProjectDirectoryRow {
+  id: string;
+  name: string;
+  developer: string;
+  area: string;
+  sub_location: string;
+  description: string;
+  status: ProjectInput["status"];
+  rera_number: string;
+  escrow_bank: string;
+  handover_date: string | null;
+  launch_date: string | null;
+  total_units: number | null;
+  amenities: string;
+  currency: string;
+  golden_visa_eligible: boolean;
+  hero_image_data_url: string | null;
+  unit_types_json: string;
+  comparable_projects_json: string;
+  updated_at: string;
+}
+
+export async function lookupProjectDirectory(name: string): Promise<ProjectDirectoryMatch | null> {
+  const normalized = normalizeProjectName(name);
+  if (!normalized) return null;
+
+  const rows = await sql<ProjectDirectoryRow[]>`
+    SELECT * FROM project_directory
+    WHERE name_normalized = ${normalized}
+       OR name_normalized ILIKE ${"%" + normalized + "%"}
+       OR ${normalized} ILIKE ('%' || name_normalized || '%')
+    ORDER BY
+      (name_normalized = ${normalized}) DESC,
+      times_used DESC,
+      updated_at DESC
+    LIMIT 1
+  `;
+  const row = rows[0];
+  if (!row) return null;
+
+  await sql`UPDATE project_directory SET times_used = times_used + 1 WHERE id = ${row.id}`;
+
+  return {
+    name: row.name,
+    developer: row.developer,
+    area: row.area,
+    subLocation: row.sub_location,
+    description: row.description,
+    status: row.status,
+    reraNumber: row.rera_number,
+    escrowBank: row.escrow_bank,
+    handoverDate: row.handover_date,
+    launchDate: row.launch_date,
+    totalUnits: row.total_units,
+    amenities: safeParseArray(row.amenities),
+    currency: row.currency,
+    goldenVisaEligible: row.golden_visa_eligible,
+    heroImageDataUrl: row.hero_image_data_url,
+    unitTypes: safeParseArray(row.unit_types_json),
+    comparableProjects: safeParseArray(row.comparable_projects_json),
+    updatedAt: row.updated_at,
+  };
 }
 
 /* -------------------------------------------------------------------------- */

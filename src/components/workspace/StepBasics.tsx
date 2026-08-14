@@ -2,15 +2,23 @@
 
 import { ProjectInput } from "@/lib/types";
 import { Field, TextInput, TextArea, Select } from "./formFields";
-import { X } from "lucide-react";
+import { Loader2, Wand2, X } from "lucide-react";
 import { useRef } from "react";
+
+export type AutofillStatus = "idle" | "loading" | "found" | "not-found";
 
 export default function StepBasics({
   project,
   onChange,
+  onAutofill,
+  autofillStatus = "idle",
+  autofillNote,
 }: {
   project: ProjectInput;
   onChange: (patch: Partial<ProjectInput>) => void;
+  onAutofill?: () => void;
+  autofillStatus?: AutofillStatus;
+  autofillNote?: string | null;
 }) {
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -37,7 +45,42 @@ export default function StepBasics({
 
       <div className="grid sm:grid-cols-2 gap-4">
         <Field label="Project Name" className="sm:col-span-2">
-          <TextInput value={project.name} onChange={(e) => onChange({ name: e.target.value })} placeholder="e.g. Marina Horizon Residences" />
+          <div className="flex items-center gap-2">
+            <TextInput
+              value={project.name}
+              onChange={(e) => onChange({ name: e.target.value })}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  onAutofill?.();
+                }
+              }}
+              placeholder="e.g. Marina Horizon Residences"
+              className="flex-1"
+            />
+            {onAutofill && (
+              <button
+                type="button"
+                onClick={onAutofill}
+                disabled={!project.name.trim() || autofillStatus === "loading"}
+                title="Autofill from your project directory"
+                aria-label="Autofill from your project directory"
+                className="btn-secondary shrink-0 px-3 py-2.5 disabled:opacity-40"
+              >
+                {autofillStatus === "loading" ? <Loader2 size={15} className="animate-spin" /> : <Wand2 size={15} />}
+              </button>
+            )}
+          </div>
+          {autofillStatus === "found" && (
+            <p className="text-[11px] text-brand-positive mt-1.5">
+              Filled from your project directory. {autofillNote}
+            </p>
+          )}
+          {autofillStatus === "not-found" && (
+            <p className="text-[11px] text-brand-muted mt-1.5">
+              No match in your project directory yet — this will be the first entry for this project.
+            </p>
+          )}
         </Field>
 
         <Field label="Developer">

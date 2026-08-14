@@ -172,3 +172,43 @@ export const financialAssumptionsRelations = relations(financialAssumptions, ({ 
 export const generatedReportsRelations = relations(generatedReports, ({ one }) => ({
   project: one(projects, { fields: [generatedReports.projectId], references: [projects.id] }),
 }));
+
+/**
+ * A growing, shared library of project facts, decoupled from any single
+ * `projects` row (no FK — it must survive that project being edited or
+ * deleted). Every time an agent saves a project with a non-empty name, this
+ * table is upserted (keyed by normalized name) with that project's basics,
+ * unit types and comparables. When any agent later starts a new project and
+ * types a matching name, the wizard can look this up and pre-fill the form
+ * instead of starting blank — the database gets more useful the more it's used.
+ */
+export const projectDirectory = pgTable("project_directory", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull(),
+  nameNormalized: text("name_normalized").notNull().unique(),
+  developer: text("developer").notNull().default(""),
+  area: text("area").notNull().default(""),
+  subLocation: text("sub_location").notNull().default(""),
+  description: text("description").notNull().default(""),
+  status: text("status", { enum: ["off_plan", "ready", "secondary"] })
+    .notNull()
+    .default("off_plan"),
+  reraNumber: text("rera_number").notNull().default(""),
+  escrowBank: text("escrow_bank").notNull().default(""),
+  handoverDate: text("handover_date"),
+  launchDate: text("launch_date"),
+  totalUnits: integer("total_units"),
+  amenities: text("amenities").notNull().default("[]"), // JSON string[]
+  currency: text("currency").notNull().default("AED"),
+  goldenVisaEligible: boolean("golden_visa_eligible").notNull().default(false),
+  heroImageDataUrl: text("hero_image_data_url"), // set once by whichever agent first uploads one; never cleared by later saves that omit it
+  unitTypesJson: text("unit_types_json").notNull().default("[]"), // JSON UnitTypeInput[] (no id/projectId)
+  comparableProjectsJson: text("comparable_projects_json").notNull().default("[]"), // JSON ComparableProjectInput[] (no id/projectId)
+  timesUsed: integer("times_used").notNull().default(0),
+  createdAt: text("created_at")
+    .notNull()
+    .default(sql`now()`),
+  updatedAt: text("updated_at")
+    .notNull()
+    .default(sql`now()`),
+});

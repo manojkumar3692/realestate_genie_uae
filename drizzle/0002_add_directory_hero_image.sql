@@ -1,0 +1,1 @@
+ALTER TABLE "project_directory" ADD COLUMN "hero_image_data_url" text;
