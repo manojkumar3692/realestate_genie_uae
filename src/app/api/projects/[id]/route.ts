@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { deleteProject, getProjectBundle, saveProjectBundle } from "@/db/repo";
+import { DuplicateProjectNameError, deleteProject, getProjectBundle, saveProjectBundle } from "@/db/repo";
 
 export async function GET(
   _request: NextRequest,
@@ -23,8 +23,15 @@ export async function PUT(
     return NextResponse.json({ error: "Project not found" }, { status: 404 });
   }
   const body = await request.json();
-  const bundle = await saveProjectBundle(id, body);
-  return NextResponse.json(bundle);
+  try {
+    const bundle = await saveProjectBundle(id, body);
+    return NextResponse.json(bundle);
+  } catch (err) {
+    if (err instanceof DuplicateProjectNameError) {
+      return NextResponse.json({ error: err.message }, { status: 409 });
+    }
+    throw err;
+  }
 }
 
 export async function DELETE(

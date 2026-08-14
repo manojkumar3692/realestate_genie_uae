@@ -1,26 +1,50 @@
 "use client";
 
-import { ProjectInput } from "@/lib/types";
+import { ProjectDirectoryMatch, ProjectInput } from "@/lib/types";
 import { Field, TextInput, TextArea, Select } from "./formFields";
 import { Loader2, Wand2, X } from "lucide-react";
-import { useRef } from "react";
+import { useEffect, useRef } from "react";
 
 export type AutofillStatus = "idle" | "loading" | "found" | "not-found";
 
 export default function StepBasics({
   project,
   onChange,
-  onAutofill,
+  onSuggest,
+  suggestions = [],
+  suggestOpen = false,
+  suggestLoading = false,
+  onPickSuggestion,
+  onCloseSuggestions,
   autofillStatus = "idle",
   autofillNote,
 }: {
   project: ProjectInput;
   onChange: (patch: Partial<ProjectInput>) => void;
-  onAutofill?: () => void;
+  /** Fetches candidate matches for whatever is currently typed in the name field. */
+  onSuggest?: () => void;
+  suggestions?: ProjectDirectoryMatch[];
+  suggestOpen?: boolean;
+  suggestLoading?: boolean;
+  onPickSuggestion?: (match: ProjectDirectoryMatch) => void;
+  onCloseSuggestions?: () => void;
   autofillStatus?: AutofillStatus;
   autofillNote?: string | null;
 }) {
   const fileRef = useRef<HTMLInputElement>(null);
+  const nameWrapRef = useRef<HTMLDivElement>(null);
+
+  // Dismiss the suggestions dropdown on outside click or Escape.
+  useEffect(() => {
+    if (!suggestOpen) return;
+    function handlePointerDown(e: MouseEvent) {
+      if (nameWrapRef.current && !nameWrapRef.current.contains(e.target as Node)) {
+        onCloseSuggestions?.();
+      }
+    }
+    document.addEventListener("mousedown", handlePointerDown);
+    return () => document.removeEventListener("mousedown", handlePointerDown);
+  }, [suggestOpen, onCloseSuggestions]);
 
   function handleImage(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
@@ -45,30 +69,57 @@ export default function StepBasics({
 
       <div className="grid sm:grid-cols-2 gap-4">
         <Field label="Project Name" className="sm:col-span-2">
-          <div className="flex items-center gap-2">
-            <TextInput
-              value={project.name}
-              onChange={(e) => onChange({ name: e.target.value })}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  e.preventDefault();
-                  onAutofill?.();
-                }
-              }}
-              placeholder="e.g. Marina Horizon Residences"
-              className="flex-1"
-            />
-            {onAutofill && (
-              <button
-                type="button"
-                onClick={onAutofill}
-                disabled={!project.name.trim() || autofillStatus === "loading"}
-                title="Autofill from your project directory"
-                aria-label="Autofill from your project directory"
-                className="btn-secondary shrink-0 px-3 py-2.5 disabled:opacity-40"
-              >
-                {autofillStatus === "loading" ? <Loader2 size={15} className="animate-spin" /> : <Wand2 size={15} />}
-              </button>
+          <div ref={nameWrapRef} className="relative">
+            <div className="flex items-center gap-2">
+              <TextInput
+                value={project.name}
+                onChange={(e) => onChange({ name: e.target.value })}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    onSuggest?.();
+                  } else if (e.key === "Escape") {
+                    onCloseSuggestions?.();
+                  }
+                }}
+                placeholder="e.g. Marina Horizon Residences"
+                className="flex-1"
+              />
+              {onSuggest && (
+                <button
+                  type="button"
+                  onClick={onSuggest}
+                  disabled={!project.name.trim() || suggestLoading}
+                  title="Find matching projects in your directory"
+                  aria-label="Find matching projects in your directory"
+                  className="btn-secondary shrink-0 px-3 py-2.5 disabled:opacity-40"
+                >
+                  {suggestLoading ? <Loader2 size={15} className="animate-spin" /> : <Wand2 size={15} />}
+                </button>
+              )}
+            </div>
+
+            {suggestOpen && suggestions.length > 0 && (
+              <div className="absolute z-20 mt-1.5 w-full rounded-lg border border-brand-border bg-white shadow-lg overflow-hidden">
+                <p className="px-3 pt-2.5 pb-1.5 text-[11px] font-medium uppercase tracking-wide text-brand-muted">
+                  Matching projects — select one to reuse
+                </p>
+                <div className="max-h-64 overflow-y-auto divide-y divide-brand-border">
+                  {suggestions.map((m) => (
+                    <button
+                      key={m.name}
+                      type="button"
+                      onClick={() => onPickSuggestion?.(m)}
+                      className="w-full text-left px-3 py-2.5 hover:bg-brand-cream transition-colors"
+                    >
+                      <p className="text-sm font-medium text-brand-primary">{m.name}</p>
+                      <p className="text-xs text-brand-muted">
+                        {[m.developer, m.area].filter(Boolean).join(" • ") || "No details yet"}
+                      </p>
+                    </button>
+                  ))}
+                </div>
+              </div>
             )}
           </div>
           {autofillStatus === "found" && (
@@ -78,7 +129,7 @@ export default function StepBasics({
           )}
           {autofillStatus === "not-found" && (
             <p className="text-[11px] text-brand-muted mt-1.5">
-              No match in your project directory yet — this will be the first entry for this project.
+              No matching projects found in your directory — this will be the first entry for this name.
             </p>
           )}
         </Field>

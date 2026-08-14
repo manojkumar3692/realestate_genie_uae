@@ -81,6 +81,7 @@ export async function listProjects(): Promise<ProjectSummary[]> {
 /* -------------------------------------------------------------------------- */
 
 export async function createDraftProject(name: string = "Untitled Project"): Promise<string> {
+  await assertProjectNameAvailable(name, "");
   const id = randomUUID();
   const now = new Date().toISOString();
   await db.insert(projects).values({ id, name, createdAt: now, updatedAt: now });
@@ -145,6 +146,7 @@ export interface ProjectBundleWriteInput {
 }
 
 export async function saveProjectBundle(id: string, input: ProjectBundleWriteInput) {
+  await assertProjectNameAvailable(input.project.name, id);
   const now = new Date().toISOString();
 
   await db.transaction(async (tx) => {
@@ -227,6 +229,40 @@ export async function saveProjectBundle(id: string, input: ProjectBundleWriteInp
 
 function normalizeProjectName(name: string): string {
   return name.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+/**
+ * Thrown when a save/create would leave two projects with the same name.
+ * Routes catch this and turn it into a 409 with a user-facing message.
+ */
+export class DuplicateProjectNameError extends Error {}
+
+const UNTITLED_PROJECT_NORMALIZED = normalizeProjectName("Untitled Project");
+
+/**
+ * Enforces one global rule: no two projects share a name (case/whitespace
+ * insensitive). There's no agent/user concept in the schema yet (see the
+ * "no auth/multi-tenant yet" note on firmSettings above), so this is scoped
+ * across every project in the system for now — revisit per-agent scoping
+ * once accounts exist.
+ *
+ * Deliberately skips blank names and the "Untitled Project" placeholder, so
+ * agents can still have multiple fresh, not-yet-named drafts in flight —
+ * the constraint only kicks in once a project actually has a real name.
+ */
+async function assertProjectNameAvailable(name: string, excludeProjectId: string) {
+  const trimmed = (name ?? "").trim();
+  if (!trimmed) return;
+  const normalized = normalizeProjectName(trimmed);
+  if (normalized === UNTITLED_PROJECT_NORMALIZED) return;
+
+  const rows = await db.select({ id: projects.id, name: projects.name }).from(projects);
+  const clash = rows.find((r) => r.id !== excludeProjectId && normalizeProjectName(r.name) === normalized);
+  if (clash) {
+    throw new DuplicateProjectNameError(
+      `You already have a project named "${trimmed}". Use the magic wand on the name field to reuse it, or choose a different name.`
+    );
+  }
 }
 
 async function upsertProjectDirectoryFromBundle(bundle: ProjectBundle) {
@@ -319,26 +355,7 @@ interface ProjectDirectoryRow {
   updated_at: string;
 }
 
-export async function lookupProjectDirectory(name: string): Promise<ProjectDirectoryMatch | null> {
-  const normalized = normalizeProjectName(name);
-  if (!normalized) return null;
-
-  const rows = await sql<ProjectDirectoryRow[]>`
-    SELECT * FROM project_directory
-    WHERE name_normalized = ${normalized}
-       OR name_normalized ILIKE ${"%" + normalized + "%"}
-       OR ${normalized} ILIKE ('%' || name_normalized || '%')
-    ORDER BY
-      (name_normalized = ${normalized}) DESC,
-      times_used DESC,
-      updated_at DESC
-    LIMIT 1
-  `;
-  const row = rows[0];
-  if (!row) return null;
-
-  await sql`UPDATE project_directory SET times_used = times_used + 1 WHERE id = ${row.id}`;
-
+function mapDirectoryRow(row: ProjectDirectoryRow): ProjectDirectoryMatch {
   return {
     name: row.name,
     developer: row.developer,
@@ -359,6 +376,57 @@ export async function lookupProjectDirectory(name: string): Promise<ProjectDirec
     comparableProjects: safeParseArray(row.comparable_projects_json),
     updatedAt: row.updated_at,
   };
+}
+
+export async function lookupProjectDirectory(name: string): Promise<ProjectDirectoryMatch | null> {
+  const normalized = normalizeProjectName(name);
+  if (!normalized) return null;
+
+  const rows = await sql<ProjectDirectoryRow[]>`
+    SELECT * FROM project_directory
+    WHERE name_normalized = ${normalized}
+       OR name_normalized ILIKE ${"%" + normalized + "%"}
+       OR ${normalized} ILIKE ('%' || name_normalized || '%')
+    ORDER BY
+      (name_normalized = ${normalized}) DESC,
+      times_used DESC,
+      updated_at DESC
+    LIMIT 1
+  `;
+  const row = rows[0];
+  if (!row) return null;
+
+  await sql`UPDATE project_directory SET times_used = times_used + 1 WHERE id = ${row.id}`;
+
+  return mapDirectoryRow(row);
+}
+
+/**
+ * Like lookupProjectDirectory, but returns up to `limit` candidate matches
+ * instead of silently picking the single "best" one — used to populate the
+ * magic-wand dropdown so the agent can see all similarly-named projects and
+ * pick the one they actually mean. Doesn't bump times_used itself; that
+ * happens when the agent commits to a pick (via the exact-match lookup
+ * above), so browsing the list doesn't skew the popularity ranking.
+ */
+export async function lookupProjectDirectorySuggestions(
+  name: string,
+  limit = 6
+): Promise<ProjectDirectoryMatch[]> {
+  const normalized = normalizeProjectName(name);
+  if (!normalized) return [];
+
+  const rows = await sql<ProjectDirectoryRow[]>`
+    SELECT * FROM project_directory
+    WHERE name_normalized ILIKE ${"%" + normalized + "%"}
+       OR ${normalized} ILIKE ('%' || name_normalized || '%')
+    ORDER BY
+      (name_normalized = ${normalized}) DESC,
+      times_used DESC,
+      updated_at DESC
+    LIMIT ${limit}
+  `;
+  return rows.map(mapDirectoryRow);
 }
 
 /* -------------------------------------------------------------------------- */

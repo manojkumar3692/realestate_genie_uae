@@ -11,7 +11,42 @@ import StepPaymentPlan from "./StepPaymentPlan";
 import StepComparables from "./StepComparables";
 import StepFinancials from "./StepFinancials";
 import StepReview from "./StepReview";
-import { Check, Loader2, Save, Trash2, Building2, LayoutGrid, CalendarClock, TrendingUp, Wallet2, FileCheck2 } from "lucide-react";
+import { Check, Loader2, Save, Trash2, Building2, LayoutGrid, CalendarClock, TrendingUp, Wallet2, FileCheck2, AlertTriangle } from "lucide-react";
+
+/**
+ * Applies a picked project-directory match onto the current bundle. Never
+ * clobbers unit types / comparables the agent has already started entering —
+ * only fills those if the agent hasn't touched them yet.
+ */
+function applyDirectoryMatch(prev: ProjectBundle, m: ProjectDirectoryMatch): ProjectBundle {
+  return {
+    ...prev,
+    project: {
+      ...prev.project,
+      name: m.name,
+      developer: m.developer || prev.project.developer,
+      area: m.area || prev.project.area,
+      subLocation: m.subLocation || prev.project.subLocation,
+      description: m.description || prev.project.description,
+      status: m.status || prev.project.status,
+      reraNumber: m.reraNumber || prev.project.reraNumber,
+      escrowBank: m.escrowBank || prev.project.escrowBank,
+      handoverDate: m.handoverDate ?? prev.project.handoverDate,
+      launchDate: m.launchDate ?? prev.project.launchDate,
+      totalUnits: m.totalUnits ?? prev.project.totalUnits,
+      amenities: m.amenities.length ? m.amenities : prev.project.amenities,
+      currency: m.currency || prev.project.currency,
+      goldenVisaEligible: m.goldenVisaEligible,
+      heroImageDataUrl: prev.project.heroImageDataUrl ?? m.heroImageDataUrl,
+    },
+    unitTypes: prev.unitTypes.length
+      ? prev.unitTypes
+      : m.unitTypes.map((u, idx) => ({ ...u, id: crypto.randomUUID(), projectId: "", sortOrder: idx })),
+    comparableProjects: prev.comparableProjects.length
+      ? prev.comparableProjects
+      : m.comparableProjects.map((c, idx) => ({ ...c, id: crypto.randomUUID(), projectId: "", sortOrder: idx })),
+  };
+}
 
 const STEPS = [
   { key: "basics", label: "Basics", icon: Building2 },
@@ -38,70 +73,50 @@ export default function ProjectWorkspace({
   const [direction, setDirection] = useState(1);
   const [autofillStatus, setAutofillStatus] = useState<AutofillStatus>("idle");
   const [autofillNote, setAutofillNote] = useState<string | null>(null);
+  const [suggestOpen, setSuggestOpen] = useState(false);
+  const [suggestLoading, setSuggestLoading] = useState(false);
+  const [suggestions, setSuggestions] = useState<ProjectDirectoryMatch[]>([]);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   const StepIcon = STEPS[stepIdx].icon;
 
-  async function handleAutofill() {
+  // Looks up candidate matches for whatever's typed in the name field right
+  // now, and opens the picker so the agent chooses which one they mean —
+  // rather than the system silently guessing the single best match.
+  async function handleSuggest() {
     const name = bundle.project.name.trim();
     if (!name) return;
-    setAutofillStatus("loading");
+    setSuggestLoading(true);
     try {
-      const res = await fetch(`/api/project-directory/lookup?name=${encodeURIComponent(name)}`);
-      const data: { match: ProjectDirectoryMatch | null } = await res.json();
-      if (data.match) {
-        const m = data.match;
-        setBundle((prev) => ({
-          ...prev,
-          project: {
-            ...prev.project,
-            developer: m.developer || prev.project.developer,
-            area: m.area || prev.project.area,
-            subLocation: m.subLocation || prev.project.subLocation,
-            description: m.description || prev.project.description,
-            status: m.status || prev.project.status,
-            reraNumber: m.reraNumber || prev.project.reraNumber,
-            escrowBank: m.escrowBank || prev.project.escrowBank,
-            handoverDate: m.handoverDate ?? prev.project.handoverDate,
-            launchDate: m.launchDate ?? prev.project.launchDate,
-            totalUnits: m.totalUnits ?? prev.project.totalUnits,
-            amenities: m.amenities.length ? m.amenities : prev.project.amenities,
-            currency: m.currency || prev.project.currency,
-            goldenVisaEligible: m.goldenVisaEligible,
-            heroImageDataUrl: prev.project.heroImageDataUrl ?? m.heroImageDataUrl,
-          },
-          // Only fill unit types / comparables if the agent hasn't already
-          // started entering their own — never clobber real work in progress.
-          unitTypes: prev.unitTypes.length
-            ? prev.unitTypes
-            : m.unitTypes.map((u, idx) => ({
-                ...u,
-                id: crypto.randomUUID(),
-                projectId: "",
-                sortOrder: idx,
-              })),
-          comparableProjects: prev.comparableProjects.length
-            ? prev.comparableProjects
-            : m.comparableProjects.map((c, idx) => ({
-                ...c,
-                id: crypto.randomUUID(),
-                projectId: "",
-                sortOrder: idx,
-              })),
-        }));
-        setAutofillNote(
-          `Last updated ${formatDistanceToNow(new Date(m.updatedAt), { addSuffix: true })} — please verify pricing before sending to a client.`
-        );
-        setAutofillStatus("found");
-      } else {
+      const res = await fetch(`/api/project-directory/suggestions?name=${encodeURIComponent(name)}`);
+      const data: { matches: ProjectDirectoryMatch[] } = await res.json();
+      setSuggestions(data.matches ?? []);
+      setSuggestOpen(true);
+      if (!data.matches?.length) {
         setAutofillNote(null);
         setAutofillStatus("not-found");
+        setTimeout(() => setAutofillStatus("idle"), 6000);
       }
     } catch {
-      setAutofillNote(null);
-      setAutofillStatus("not-found");
+      setSuggestions([]);
+      setSuggestOpen(true);
     } finally {
-      setTimeout(() => setAutofillStatus("idle"), 6000);
+      setSuggestLoading(false);
     }
+  }
+
+  function handlePickSuggestion(m: ProjectDirectoryMatch) {
+    setSuggestOpen(false);
+    setSaveError(null);
+    setBundle((prev) => applyDirectoryMatch(prev, m));
+    setAutofillNote(
+      `Last updated ${formatDistanceToNow(new Date(m.updatedAt), { addSuffix: true })} — please verify pricing before sending to a client.`
+    );
+    setAutofillStatus("found");
+    setTimeout(() => setAutofillStatus("idle"), 6000);
+    // Fire-and-forget: bumps the directory entry's usage count now that the
+    // agent has actually committed to this pick (browsing the list didn't).
+    fetch(`/api/project-directory/lookup?name=${encodeURIComponent(m.name)}`).catch(() => {});
   }
 
   function goTo(idx: number) {
@@ -111,6 +126,7 @@ export default function ProjectWorkspace({
 
   async function save(): Promise<boolean> {
     setSaving(true);
+    setSaveError(null);
     try {
       const res = await fetch(`/api/projects/${bundle.project.id}`, {
         method: "PUT",
@@ -123,12 +139,23 @@ export default function ProjectWorkspace({
           financials: bundle.financials,
         }),
       });
-      if (!res.ok) return false;
+      if (!res.ok) {
+        let message = "Something went wrong saving this project. Please try again.";
+        try {
+          const data = await res.json();
+          if (data?.error) message = data.error;
+        } catch {
+          // response body wasn't JSON — fall back to the generic message
+        }
+        setSaveError(message);
+        return false;
+      }
       const updated = await res.json();
       setBundle(updated);
       setSavedAt(new Date());
       return true;
     } catch {
+      setSaveError("Network error while saving. Please check your connection and try again.");
       return false;
     } finally {
       setSaving(false);
@@ -166,6 +193,23 @@ export default function ProjectWorkspace({
           </button>
         </div>
       </div>
+
+      {saveError && (
+        <div className="mb-5 flex items-start gap-2.5 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+          <AlertTriangle size={16} className="mt-0.5 shrink-0" />
+          <div className="flex-1">{saveError}</div>
+          <button
+            type="button"
+            onClick={() => {
+              setSaveError(null);
+              goTo(0);
+            }}
+            className="text-xs font-medium underline shrink-0"
+          >
+            Edit name
+          </button>
+        </div>
+      )}
 
       {/* Mobile progress bar */}
       <div className="lg:hidden mb-5">
@@ -236,8 +280,16 @@ export default function ProjectWorkspace({
               {stepIdx === 0 && (
                 <StepBasics
                   project={bundle.project}
-                  onChange={(patch) => setBundle({ ...bundle, project: { ...bundle.project, ...patch } })}
-                  onAutofill={handleAutofill}
+                  onChange={(patch) => {
+                    setSaveError(null);
+                    setBundle({ ...bundle, project: { ...bundle.project, ...patch } });
+                  }}
+                  onSuggest={handleSuggest}
+                  suggestions={suggestions}
+                  suggestOpen={suggestOpen}
+                  suggestLoading={suggestLoading}
+                  onPickSuggestion={handlePickSuggestion}
+                  onCloseSuggestions={() => setSuggestOpen(false)}
                   autofillStatus={autofillStatus}
                   autofillNote={autofillNote}
                 />
@@ -276,8 +328,8 @@ export default function ProjectWorkspace({
             {stepIdx < STEPS.length - 1 ? (
               <button
                 onClick={async () => {
-                  await save();
-                  goTo(Math.min(STEPS.length - 1, stepIdx + 1));
+                  const ok = await save();
+                  if (ok) goTo(Math.min(STEPS.length - 1, stepIdx + 1));
                 }}
                 className="btn-primary text-sm"
               >

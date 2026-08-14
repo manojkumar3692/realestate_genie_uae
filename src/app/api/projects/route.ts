@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createDraftProject, listProjects } from "@/db/repo";
+import { DuplicateProjectNameError, createDraftProject, listProjects } from "@/db/repo";
 
 export async function GET() {
   return NextResponse.json(await listProjects());
@@ -13,6 +13,13 @@ export async function POST(request: NextRequest) {
   } catch {
     // no body provided — use default name
   }
-  const id = await createDraftProject(name);
-  return NextResponse.json({ id }, { status: 201 });
+  try {
+    const id = await createDraftProject(name);
+    return NextResponse.json({ id }, { status: 201 });
+  } catch (err) {
+    if (err instanceof DuplicateProjectNameError) {
+      return NextResponse.json({ error: err.message }, { status: 409 });
+    }
+    throw err;
+  }
 }
