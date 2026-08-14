@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createDraftProject, listProjects } from "@/db/repo";
 
 export async function GET() {
-  return NextResponse.json(listProjects());
+  return NextResponse.json(await listProjects());
 }
 
 export async function POST(request: NextRequest) {
@@ -13,6 +13,6 @@ export async function POST(request: NextRequest) {
   } catch {
     // no body provided — use default name
   }
-  const id = createDraftProject(name);
+  const id = await createDraftProject(name);
   return NextResponse.json({ id }, { status: 201 });
 }

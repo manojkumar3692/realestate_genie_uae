@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getProjectBundle, insertGeneratedReport, listReportsForProject } from "@/db/repo";
 import { buildComputedReportData, renderReportHtml } from "@/lib/pdf-template";
-import { htmlToPdfBuffer, savePdfToDisk } from "@/lib/pdf-generate";
+import { htmlToPdfBuffer } from "@/lib/pdf-generate";
+import { uploadPdf } from "@/lib/pdf-storage";
 import type { ProjectBundle, ReportClientInfo } from "@/lib/types";
 
 export async function GET(
@@ -9,7 +10,7 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
-  const reports = listReportsForProject(id);
+  const reports = await listReportsForProject(id);
   return NextResponse.json(reports);
 }
 
@@ -23,7 +24,7 @@ export async function POST(
   // Start from the persisted bundle, then apply any manual overrides the agent
   // made in the review step (e.g. tweaking appreciation %, a unit price, etc.)
   // without necessarily saving those tweaks back as the project's baseline.
-  const baseBundle = getProjectBundle(id);
+  const baseBundle = await getProjectBundle(id);
   if (!baseBundle) {
     return NextResponse.json({ error: "Project not found" }, { status: 404 });
   }
@@ -50,16 +51,19 @@ export async function POST(
 
   const safeName = bundle.project.name.replace(/[^a-z0-9]+/gi, "-").toLowerCase();
   const fileName = `${safeName}-${Date.now()}.pdf`;
-  await savePdfToDisk(fileName, pdfBuffer);
+  // Object path within the Supabase Storage bucket; scoped by project id so
+  // files from different projects never collide even if names match.
+  const objectPath = `${id}/${fileName}`;
+  await uploadPdf(objectPath, pdfBuffer);
 
-  const reportId = insertGeneratedReport({
+  const reportId = await insertGeneratedReport({
     projectId: id,
     clientName: clientInfo.clientName,
     clientPhone: clientInfo.clientPhone,
     clientEmail: clientInfo.clientEmail,
     focusUnitTypeId: clientInfo.focusUnitTypeId,
     snapshotJson: JSON.stringify({ bundle, clientInfo }),
-    pdfFileName: fileName,
+    pdfFileName: objectPath,
   });
 
   return NextResponse.json({

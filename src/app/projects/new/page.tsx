@@ -3,7 +3,7 @@ import { createDraftProject } from "@/db/repo";
 
 export const dynamic = "force-dynamic";
 
-export default function NewProjectPage() {
-  const id = createDraftProject("Untitled Project");
+export default async function NewProjectPage() {
+  const id = await createDraftProject("Untitled Project");
   redirect(`/projects/${id}`);
 }

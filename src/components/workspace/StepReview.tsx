@@ -122,8 +122,8 @@ export default function StepReview({
       </div>
 
       {preview && (
-        <div className="card-surface p-4">
-          <div className="text-xs font-semibold text-brand-muted uppercase tracking-wide mb-3">Live Preview</div>
+        <div className="rounded-2xl gradient-hero texture-dots p-5 md:p-6">
+          <div className="text-xs font-semibold text-brand-accent-light uppercase tracking-wide mb-3.5">Live Preview</div>
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
             <MiniStat label="Entry Price" value={formatMoney(focusUnit.representativePrice || focusUnit.priceFrom, bundle.project.currency)} />
             <MiniStat
@@ -133,7 +133,7 @@ export default function StepReview({
             <MiniStat label="Cumulative ROI" value={`${preview.last.roiOnInvestmentPercent.toFixed(1)}%`} positive />
             <MiniStat label="Exit Money Multiple" value={`${preview.exit.moneyMultiple.toFixed(2)}x`} positive />
           </div>
-          <p className="text-[11px] text-brand-muted mt-3">
+          <p className="text-[11px] text-white/55 mt-4">
             Want different numbers? Go back to the Financials or Unit Types step to adjust assumptions — this preview
             updates instantly, and the generated PDF will always reflect your latest edits.
           </p>
@@ -189,9 +189,9 @@ export default function StepReview({
 
 function MiniStat({ label, value, positive }: { label: string; value: string; positive?: boolean }) {
   return (
-    <div className="bg-brand-cream rounded-lg p-3">
-      <div className="text-[10px] uppercase tracking-wide text-brand-muted mb-1">{label}</div>
-      <div className={`text-sm font-bold ${positive ? "text-brand-positive" : "text-brand-primary"}`}>{value}</div>
+    <div className="bg-white/8 border border-white/10 rounded-xl p-3.5 backdrop-blur-sm">
+      <div className="text-[10px] uppercase tracking-wide text-white/55 mb-1.5">{label}</div>
+      <div className={`text-base font-display font-semibold ${positive ? "text-brand-accent-light" : "text-white"}`}>{value}</div>
     </div>
   );
 }

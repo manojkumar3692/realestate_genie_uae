@@ -1,9 +1,11 @@
 import {
-  sqliteTable,
+  pgTable,
   text,
   integer,
   real,
-} from "drizzle-orm/sqlite-core";
+  boolean,
+  serial,
+} from "drizzle-orm/pg-core";
 import { relations, sql } from "drizzle-orm";
 
 /**
@@ -11,8 +13,8 @@ import { relations, sql } from "drizzle-orm";
  * Single-row table for now (no auth/multi-tenant yet) — every generated PDF
  * pulls branding (logo, colors, contact info) from here.
  */
-export const firmSettings = sqliteTable("firm_settings", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
+export const firmSettings = pgTable("firm_settings", {
+  id: serial("id").primaryKey(),
   firmName: text("firm_name").notNull().default("Your Brokerage"),
   agentName: text("agent_name").notNull().default(""),
   agentTitle: text("agent_title").notNull().default("Real Estate Consultant"),
@@ -28,10 +30,10 @@ export const firmSettings = sqliteTable("firm_settings", {
   ),
   updatedAt: text("updated_at")
     .notNull()
-    .default(sql`(CURRENT_TIMESTAMP)`),
+    .default(sql`now()`),
 });
 
-export const projects = sqliteTable("projects", {
+export const projects = pgTable("projects", {
   id: text("id").primaryKey(),
   name: text("name").notNull(),
   developer: text("developer").notNull().default(""),
@@ -49,16 +51,16 @@ export const projects = sqliteTable("projects", {
   amenities: text("amenities").notNull().default("[]"), // JSON string[]
   heroImageDataUrl: text("hero_image_data_url"),
   currency: text("currency").notNull().default("AED"),
-  goldenVisaEligible: integer("golden_visa_eligible", { mode: "boolean" }).default(false),
+  goldenVisaEligible: boolean("golden_visa_eligible").notNull().default(false),
   createdAt: text("created_at")
     .notNull()
-    .default(sql`(CURRENT_TIMESTAMP)`),
+    .default(sql`now()`),
   updatedAt: text("updated_at")
     .notNull()
-    .default(sql`(CURRENT_TIMESTAMP)`),
+    .default(sql`now()`),
 });
 
-export const unitTypes = sqliteTable("unit_types", {
+export const unitTypes = pgTable("unit_types", {
   id: text("id").primaryKey(),
   projectId: text("project_id")
     .notNull()
@@ -73,7 +75,7 @@ export const unitTypes = sqliteTable("unit_types", {
   sortOrder: integer("sort_order").notNull().default(0),
 });
 
-export const paymentMilestones = sqliteTable("payment_milestones", {
+export const paymentMilestones = pgTable("payment_milestones", {
   id: text("id").primaryKey(),
   projectId: text("project_id")
     .notNull()
@@ -89,7 +91,7 @@ export const paymentMilestones = sqliteTable("payment_milestones", {
   sortOrder: integer("sort_order").notNull().default(0),
 });
 
-export const comparableProjects = sqliteTable("comparable_projects", {
+export const comparableProjects = pgTable("comparable_projects", {
   id: text("id").primaryKey(),
   projectId: text("project_id")
     .notNull()
@@ -102,7 +104,7 @@ export const comparableProjects = sqliteTable("comparable_projects", {
   sortOrder: integer("sort_order").notNull().default(0),
 });
 
-export const financialAssumptions = sqliteTable("financial_assumptions", {
+export const financialAssumptions = pgTable("financial_assumptions", {
   id: text("id").primaryKey(),
   projectId: text("project_id")
     .notNull()
@@ -113,7 +115,7 @@ export const financialAssumptions = sqliteTable("financial_assumptions", {
   rentalYieldPercent: real("rental_yield_percent").notNull().default(7),
   rentGrowthPercent: real("rent_growth_percent").notNull().default(4),
   vacancyPercent: real("vacancy_percent").notNull().default(5),
-  loanEnabled: integer("loan_enabled", { mode: "boolean" }).notNull().default(true),
+  loanEnabled: boolean("loan_enabled").notNull().default(true),
   ltvPercent: real("ltv_percent").notNull().default(50),
   interestRatePercent: real("interest_rate_percent").notNull().default(4.5),
   tenureYears: integer("tenure_years").notNull().default(20),
@@ -124,7 +126,7 @@ export const financialAssumptions = sqliteTable("financial_assumptions", {
   exitSellingCostPercent: real("exit_selling_cost_percent").notNull().default(4),
 });
 
-export const generatedReports = sqliteTable("generated_reports", {
+export const generatedReports = pgTable("generated_reports", {
   id: text("id").primaryKey(),
   projectId: text("project_id")
     .notNull()
@@ -134,10 +136,10 @@ export const generatedReports = sqliteTable("generated_reports", {
   clientEmail: text("client_email").notNull().default(""),
   focusUnitTypeId: text("focus_unit_type_id"),
   snapshotJson: text("snapshot_json").notNull(), // full immutable data snapshot used to render this PDF
-  pdfFileName: text("pdf_file_name").notNull(),
+  pdfFileName: text("pdf_file_name").notNull(), // storage object path within the Supabase bucket
   createdAt: text("created_at")
     .notNull()
-    .default(sql`(CURRENT_TIMESTAMP)`),
+    .default(sql`now()`),
 });
 
 export const projectsRelations = relations(projects, ({ many, one }) => ({

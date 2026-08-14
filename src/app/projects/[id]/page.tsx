@@ -6,10 +6,11 @@ export const dynamic = "force-dynamic";
 
 export default async function ProjectPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  const bundle = getProjectBundle(id);
+  const bundle = await getProjectBundle(id);
   if (!bundle) notFound();
 
-  const reports = listReportsForProject(id).map((r) => ({
+  const reportsRaw = await listReportsForProject(id);
+  const reports = reportsRaw.map((r) => ({
     id: r.id,
     clientName: r.clientName,
     createdAt: r.createdAt,

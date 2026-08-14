@@ -1,26 +1,36 @@
-import Database from "better-sqlite3";
-import { drizzle } from "drizzle-orm/better-sqlite3";
-import path from "path";
-import fs from "fs";
+import postgres from "postgres";
+import { drizzle } from "drizzle-orm/postgres-js";
 import * as schema from "./schema";
 
-const dataDir = path.join(process.cwd(), "data");
-if (!fs.existsSync(dataDir)) {
-  fs.mkdirSync(dataDir, { recursive: true });
+const connectionString = process.env.DATABASE_URL;
+
+if (!connectionString) {
+  throw new Error(
+    "DATABASE_URL is not set. Create a Supabase project, copy its connection string " +
+      "(Project Settings -> Database -> Connection string -> Transaction pooler), and set it " +
+      "as DATABASE_URL in your .env.local file (for local dev) and in your Vercel project's " +
+      "Environment Variables (for production)."
+  );
 }
 
-const dbPath = path.join(dataDir, "app.db");
+// Reuse a single connection across hot-reloads in dev and across warm serverless invocations.
+const globalForDb = globalThis as unknown as { __pgClient?: ReturnType<typeof postgres> };
 
-// Reuse a single connection across hot-reloads in dev.
-const globalForDb = globalThis as unknown as { __sqlite?: Database.Database };
-
-const sqlite = globalForDb.__sqlite ?? new Database(dbPath);
-sqlite.pragma("journal_mode = WAL");
-sqlite.pragma("foreign_keys = ON");
+const client =
+  globalForDb.__pgClient ??
+  postgres(connectionString, {
+    // Supabase's connection pooler (pgbouncer, transaction mode) does not support
+    // prepared statements, so this must stay off regardless of which connection
+    // string (pooled or direct) is used.
+    prepare: false,
+    // Keep the pool small — each serverless invocation gets its own process, so a
+    // large pool per-instance just wastes connections against Supabase's limit.
+    max: 5,
+  });
 
 if (process.env.NODE_ENV !== "production") {
-  globalForDb.__sqlite = sqlite;
+  globalForDb.__pgClient = client;
 }
 
-export const db = drizzle(sqlite, { schema });
-export { sqlite };
+export const db = drizzle(client, { schema });
+export { client as sql };

@@ -1,4 +1,8 @@
 import type { Metadata } from "next";
+import "@fontsource-variable/inter";
+import "@fontsource-variable/inter/wght-italic.css";
+import "@fontsource-variable/playfair-display";
+import "@fontsource-variable/playfair-display/wght-italic.css";
 import "./globals.css";
 import NavBar from "@/components/NavBar";
 

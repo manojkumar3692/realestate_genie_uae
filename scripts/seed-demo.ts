@@ -5,13 +5,19 @@
  *
  * Run with: npm run db:seed
  * Safe to re-run; each run adds a new demo project rather than overwriting.
+ *
+ * (Env vars come from `.env.local` via the `tsx --env-file` flag in the
+ * `db:seed` npm script — a plain `import "dotenv/config"` here wouldn't work,
+ * since ESM hoists all imports above this file's own top-level code, so
+ * everything below would already have been evaluated against an empty env.)
  */
-import { createDraftProject, saveProjectBundle, getProjectBundle, updateFirmSettings, insertGeneratedReport } from "../src/db/repo";
+import { createDraftProject, saveProjectBundle, updateFirmSettings, insertGeneratedReport } from "../src/db/repo";
 import { buildComputedReportData, renderReportHtml } from "../src/lib/pdf-template";
-import { htmlToPdfBuffer, savePdfToDisk } from "../src/lib/pdf-generate";
+import { htmlToPdfBuffer } from "../src/lib/pdf-generate";
+import { uploadPdf } from "../src/lib/pdf-storage";
 
 async function main() {
-  updateFirmSettings({
+  await updateFirmSettings({
     firmName: "Palm Coast Realty",
     agentName: "Sara Al Mansoori",
     agentTitle: "Senior Investment Consultant",
@@ -23,9 +29,9 @@ async function main() {
     accentColor: "#C9A24B",
   });
 
-  const id = createDraftProject("Marina Horizon Residences");
+  const id = await createDraftProject("Marina Horizon Residences");
 
-  const bundle = saveProjectBundle(id, {
+  const bundle = await saveProjectBundle(id, {
     project: {
       name: "Marina Horizon Residences",
       developer: "Emaar Coastal Developments",
@@ -119,20 +125,21 @@ async function main() {
 
   const pdfBuffer = await htmlToPdfBuffer(html);
   const fileName = `marina-horizon-demo-${Date.now()}.pdf`;
-  const filePath = await savePdfToDisk(fileName, pdfBuffer);
+  const objectPath = `${id}/${fileName}`;
+  await uploadPdf(objectPath, pdfBuffer);
 
-  insertGeneratedReport({
+  await insertGeneratedReport({
     projectId: id,
     clientName: clientInfo.clientName,
     clientPhone: clientInfo.clientPhone,
     clientEmail: clientInfo.clientEmail,
     focusUnitTypeId: clientInfo.focusUnitTypeId,
     snapshotJson: JSON.stringify({ bundle, clientInfo }),
-    pdfFileName: fileName,
+    pdfFileName: objectPath,
   });
 
   console.log(`\nDemo project ready: "${bundle.project.name}"`);
-  console.log(`Sample PDF generated at: ${filePath} (${(pdfBuffer.length / 1024).toFixed(0)} KB)`);
+  console.log(`Sample PDF uploaded to Supabase Storage at: ${objectPath} (${(pdfBuffer.length / 1024).toFixed(0)} KB)`);
   console.log(`\nRun "npm run dev" and open http://localhost:3000 to see it in the dashboard.`);
 }
 

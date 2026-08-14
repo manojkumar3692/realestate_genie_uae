@@ -9,6 +9,10 @@ const nextConfig: NextConfig = {
   turbopack: {
     root: path.resolve(__dirname),
   },
+  // These read their own assets from disk / fetch a remote binary at runtime and
+  // shouldn't be bundled by Next.js — keep them as plain Node.js requires so
+  // Puppeteer/Chromium behave the same in the serverless function as they do locally.
+  serverExternalPackages: ["puppeteer-core", "@sparticuz/chromium-min", "puppeteer"],
 };
 
 export default nextConfig;

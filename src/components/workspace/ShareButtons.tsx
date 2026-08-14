@@ -54,9 +54,8 @@ export default function ShareButtons({
         </button>
       </div>
       <p className="text-[11px] text-brand-muted">
-        The download link points to this app's server — it works as long as this app stays running and reachable by
-        your client. For a permanent public link, deploy the app or attach the downloaded PDF file directly in
-        WhatsApp/Email instead of sharing the link.
+        The link points to this app and generates a fresh, time-limited download URL each time it&apos;s opened, so
+        it stays valid as long as this app is deployed and reachable by your client.
       </p>
     </div>
   );

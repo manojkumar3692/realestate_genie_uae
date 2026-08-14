@@ -3,8 +3,8 @@ import SettingsForm from "@/components/SettingsForm";
 
 export const dynamic = "force-dynamic";
 
-export default function SettingsPage() {
-  const firm = getFirmSettings();
+export default async function SettingsPage() {
+  const firm = await getFirmSettings();
   return (
     <div className="max-w-2xl mx-auto px-4 md:px-6 py-8">
       <h1 className="text-2xl font-bold text-brand-primary mb-1">Firm & Branding Settings</h1>
