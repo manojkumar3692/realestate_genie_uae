@@ -10,3 +10,4 @@ export async function PUT(request: NextRequest) {
   const updated = updateFirmSettings(body);
   return NextResponse.json(updated);
 }
+
