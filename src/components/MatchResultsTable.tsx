@@ -44,9 +44,18 @@ export default function MatchResultsTable({ matches }: { matches: MatchResultRow
                 </Link>
                 <BucketBadge bucket={m.bucket} />
                 <span className="text-xs font-semibold text-brand-muted">{m.totalScore}/100</span>
+                {m.hasLimitedData && (
+                  <span
+                    className="badge badge-muted"
+                    title="We have little to no stated or AI-inferred data on this lead yet — this score reflects neutral defaults, not a confirmed fit. Worth a discovery call to find out more."
+                  >
+                    Limited data
+                  </span>
+                )}
               </div>
               <p className="text-xs text-brand-muted mt-0.5">
-                {formatMoney(m.budgetMin, m.budgetCurrency)}–{formatMoney(m.budgetMax, m.budgetCurrency)} · {m.preferredLocations.join(", ") || "Any area"} ·{" "}
+                {formatMoney(m.budgetMin, m.budgetCurrency)}–{formatMoney(m.budgetMax, m.budgetCurrency)}
+                {m.budgetIsInferred && <span className="italic"> (AI-inferred from notes)</span>} · {m.preferredLocations.join(", ") || "Any area"} ·{" "}
                 {m.bedrooms.join(", ") || "Any unit"}
               </p>
               {m.positives[0] && <p className="text-sm mt-1.5">{m.positives[0]}</p>}
@@ -96,11 +105,20 @@ function MatchDetail({ match }: { match: MatchResultRow }) {
     <div className="border-t border-brand-border p-4 bg-brand-cream/30 flex flex-col gap-4">
       <ScoreBreakdownBars breakdown={match.scoreBreakdown} />
 
-      {match.positives.length > 0 && (
+      {match.hasLimitedData && (
+        <p className="text-xs text-brand-muted -mt-1">
+          We don&apos;t have much stated or inferred data on {match.customerName.split(" ")[0]} yet — the score below reflects neutral defaults, not a
+          confirmed fit. Treat this as a discovery-call candidate rather than a verified match.
+        </p>
+      )}
+
+      {match.positives.filter(Boolean).length > 0 && (
         <div>
-          <p className="label-text mb-1.5">Why {match.customerName.split(" ")[0]} is a strong match</p>
+          <p className="label-text mb-1.5">
+            {match.hasLimitedData ? `What we know about this project` : `Why ${match.customerName.split(" ")[0]} is a strong match`}
+          </p>
           <ul className="text-sm flex flex-col gap-1">
-            {match.positives.map((p, i) => (
+            {match.positives.filter(Boolean).map((p, i) => (
               <li key={i} className="flex gap-2">
                 <span className="text-brand-positive">✓</span> {p}
               </li>
@@ -109,11 +127,11 @@ function MatchDetail({ match }: { match: MatchResultRow }) {
         </div>
       )}
 
-      {match.concerns.length > 0 && (
+      {match.concerns.filter(Boolean).length > 0 && (
         <div>
           <p className="label-text mb-1.5">Possible concerns</p>
           <ul className="text-sm flex flex-col gap-1 text-brand-muted">
-            {match.concerns.map((c, i) => (
+            {match.concerns.filter(Boolean).map((c, i) => (
               <li key={i} className="flex gap-2">
                 <span className="text-warm">!</span> {c}
               </li>

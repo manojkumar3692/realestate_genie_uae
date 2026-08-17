@@ -41,7 +41,12 @@ class OpenAiProvider implements AiProvider {
   private model: string;
 
   constructor(apiKey: string, model: string) {
-    this.client = new OpenAI({ apiKey });
+    // Explicit timeout + capped retries: the SDK's own default timeout (10 minutes) is far too
+    // long for a batched call inside an import pipeline — a single stalled/rate-limited request
+    // would otherwise block that whole batch (and everything waiting on it) for minutes with no
+    // visible sign of progress. Every call site already treats a thrown/failed call as "fall back
+    // to the deterministic result," so failing fast here is strictly safer than hanging.
+    this.client = new OpenAI({ apiKey, timeout: 45_000, maxRetries: 2 });
     this.model = model;
   }
 
@@ -57,8 +62,18 @@ class OpenAiProvider implements AiProvider {
           { role: "user", content: params.user },
         ],
       });
-      const text = response.choices[0]?.message?.content;
+      const choice = response.choices[0];
+      const text = choice?.message?.content;
       if (!text) return null;
+      if (choice?.finish_reason === "length") {
+        // The completion was cut off before finishing — JSON.parse below will reliably throw a
+        // confusing "unterminated string" / "unexpected end of input" error. Flag the real cause
+        // instead: the batch's expected output is bigger than maxOutputTokens allows.
+        console.error(
+          `[ai:${this.name}] response truncated (hit max_tokens=${params.maxOutputTokens ?? 1200}) — reduce batch size or raise maxOutputTokens for this call site`
+        );
+        return null;
+      }
       return JSON.parse(text) as T;
     } catch (err) {
       // AI is always an enhancement layer in this app — never let a

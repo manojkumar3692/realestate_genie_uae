@@ -35,10 +35,13 @@ export async function generateMatchExplanations(
 
   const batches: MatchExplanationInput[][] = [];
   for (let i = 0; i < inputs.length; i += BATCH_SIZE) batches.push(inputs.slice(i, i + BATCH_SIZE));
+  console.log(`  [ai:match-explain] ${inputs.length} candidates -> ${batches.length} batches (${CONCURRENCY} concurrent)`);
 
   let cursor = 0;
+  let done = 0;
   async function worker() {
     while (cursor < batches.length) {
+      const batchNumber = cursor + 1;
       const batch = batches[cursor++];
       const user = JSON.stringify(
         batch.map((b) => ({
@@ -48,15 +51,22 @@ export async function generateMatchExplanations(
           deterministicScore: b.deterministicScore,
         }))
       );
-      const response = await provider.completeJson<{ results: MatchExplanationResult[] }>({
-        system: SYSTEM_PROMPT,
-        user,
-        maxOutputTokens: 2500,
-      });
-      for (const r of response?.results ?? []) {
-        if (!r?.customerId) continue;
-        const clampedAdjustment = Math.max(-MAX_ADJUSTMENT, Math.min(MAX_ADJUSTMENT, r.scoreAdjustment || 0));
-        results.set(r.customerId, { ...r, scoreAdjustment: clampedAdjustment });
+      try {
+        const response = await provider.completeJson<{ results: MatchExplanationResult[] }>({
+          system: SYSTEM_PROMPT,
+          user,
+          maxOutputTokens: 2500,
+        });
+        for (const r of response?.results ?? []) {
+          if (!r?.customerId) continue;
+          const clampedAdjustment = Math.max(-MAX_ADJUSTMENT, Math.min(MAX_ADJUSTMENT, r.scoreAdjustment || 0));
+          results.set(r.customerId, { ...r, scoreAdjustment: clampedAdjustment });
+        }
+        done++;
+        console.log(`  [ai:match-explain] batch ${batchNumber}/${batches.length} done (${done}/${batches.length} total)`);
+      } catch (err) {
+        console.error(`  [ai:match-explain] batch ${batchNumber}/${batches.length} threw:`, err instanceof Error ? err.message : err);
+        done++;
       }
     }
   }

@@ -212,6 +212,7 @@ export async function runImportPipeline(
   const rawRows = await getRawImportRows(importJobId);
   const rows = rawRows.map((r) => r.rawJson);
   const rawRowIds = rawRows.map((r) => r.id);
+  console.log(`  [import] ${rows.length} raw rows loaded, normalizing…`);
 
   await updateImportJobProgress(importJobId, {
     status: "normalizing",
@@ -222,6 +223,7 @@ export async function runImportPipeline(
   const normalized: NormalizedRow[] = rows.map((r) => normalizeRow(r, acceptedMappings));
 
   // 3. Resolve source/campaign dictionary entries (small cardinality — sequential is fine).
+  console.log(`  [import] resolving source/campaign dictionary entries…`);
   const sourceCache = new Map<string, Awaited<ReturnType<typeof getOrCreateSource>>>();
   const campaignCache = new Map<string, Awaited<ReturnType<typeof getOrCreateCampaign>>>();
   for (const n of normalized) {
@@ -237,6 +239,7 @@ export async function runImportPipeline(
   }
 
   // 4. Identity resolution against existing org customers + within this batch.
+  console.log(`  [import] checking for duplicates against existing customers…`);
   await updateImportJobProgress(importJobId, {
     status: "deduplicating",
     progressJson: { stage: "deduplicating", processed: 0, total: rows.length },
@@ -265,6 +268,7 @@ export async function runImportPipeline(
   const pairs = findDuplicateCandidates(candidates);
   const confirmed = pairs.filter((p) => p.confidenceLevel === "confirmed");
   const reviewable = pairs.filter((p) => p.confidenceLevel !== "confirmed");
+  console.log(`  [import] ${confirmed.length} confirmed duplicate pair(s), ${reviewable.length} for manual review`);
 
   // Union confirmed pairs into merge groups.
   const parent = new Map<string, string>();
@@ -321,9 +325,22 @@ export async function runImportPipeline(
   let updatedExistingCount = 0;
   let processed = 0;
 
+  // Each row does ~6 sequential DB round trips (customer, 2 identities, source record, interaction,
+  // preferences, raw-row link). Doing that one row fully at a time — as this used to — means the
+  // total time is (row count) × (round trips) × (network latency to Postgres), which is what made
+  // even a few hundred rows feel like it hung. Rows that resolve to *different* customers are
+  // completely independent, so we run those concurrently; only rows that resolve to the *same*
+  // customer (duplicates merged together) are kept sequential relative to each other, since the
+  // first row's "insert" vs later rows' "update" logic depends on running in order.
+  const rowIndexesByCustomer = new Map<string, number[]>();
   for (let i = 0; i < normalized.length; i++) {
-    const n = normalized[i];
     const customerId = rowIndexToCustomerId.get(i)!;
+    if (!rowIndexesByCustomer.has(customerId)) rowIndexesByCustomer.set(customerId, []);
+    rowIndexesByCustomer.get(customerId)!.push(i);
+  }
+
+  async function writeRow(i: number, customerId: string) {
+    const n = normalized[i];
     const isNew = newCustomerIdSet.has(customerId);
     const leadDate = n.leadCreatedDate ?? new Date();
 
@@ -412,6 +429,36 @@ export async function runImportPipeline(
       });
     }
   }
+
+  const WRITE_CONCURRENCY = 20;
+  const customerGroups = Array.from(rowIndexesByCustomer.entries());
+  console.log(`  [import] writing ${customerGroups.length} unique customers (${WRITE_CONCURRENCY} concurrent workers)…`);
+  let groupCursor = 0;
+  let groupsDone = 0;
+  async function writeWorker() {
+    while (groupCursor < customerGroups.length) {
+      const [customerId, rowIndexes] = customerGroups[groupCursor++];
+      for (const i of rowIndexes) {
+        try {
+          await writeRow(i, customerId);
+        } catch (err) {
+          // Fail loud with exactly which row/customer broke, rather than a bare stack trace
+          // pointing only at the DB driver — this is what makes a real failure fixable fast.
+          console.error(
+            `  [import] FAILED writing row ${i} (customer ${customerId}, source row id ${rawRowIds[i]}):`,
+            err instanceof Error ? err.message : err
+          );
+          throw err;
+        }
+      }
+      groupsDone++;
+      if (groupsDone % 50 === 0 || groupsDone === customerGroups.length) {
+        console.log(`  [import] ${groupsDone}/${customerGroups.length} customers written`);
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(WRITE_CONCURRENCY, customerGroups.length) }, writeWorker));
+  console.log(`  [import] all customer records written`);
 
   // 6. Store reviewable (probable/possible) duplicate candidates.
   let possibleDuplicateGroups = 0;

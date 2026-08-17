@@ -192,6 +192,7 @@ h1, h2, h3, .font-display {
 .badge-hot { background: var(--hot-tint); color: var(--hot); }
 .badge-warm { background: var(--warm-tint); color: var(--warm); }
 .badge-possible { background: var(--possible-tint); color: var(--possible); }
+.badge-muted { background: var(--brand-cream-deep); color: var(--brand-muted); }
 .badge { display: inline-flex; align-items: center; gap: 4px; padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 700; }
 
 /* ---------------------------------------------------------------------- */

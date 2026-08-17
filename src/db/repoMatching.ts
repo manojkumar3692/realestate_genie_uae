@@ -112,6 +112,7 @@ export async function runMatchingForProject(projectId: string, orgId: string, ac
   }
 
   results.sort((a, b) => b.result.totalScore - a.result.totalScore);
+  console.log(`  [match] "${project.name}": ${results.length} deterministic matches from ${eligible.length} eligible customers`);
 
   // AI explanation pass on the strongest candidates only — keeps AI cost bounded.
   const topForAi = results.slice(0, AI_EXPLANATION_TOP_N);
@@ -123,13 +124,17 @@ export async function runMatchingForProject(projectId: string, orgId: string, ac
   }));
   const aiExplanations = await generateMatchExplanations(explanationInputs);
 
-  // Persist: clear old matches for this project, insert fresh.
-  await db.delete(schema.projectMatches).where(eq(schema.projectMatches.projectId, projectId));
-
+  // Build every row to write in memory first — no DB round trips in this loop. Writing one match
+  // plus its reasons at a time (two awaited inserts each, sequentially, for every customer) was
+  // the actual cause of "the analyze button just hangs": for ~370 matches that's 700+ round trips
+  // to a database on the other side of the world, one after another, with nothing printed to
+  // explain the wait. Two batched multi-row inserts at the end does the same work in 2 round trips.
   let hot = 0,
     warm = 0,
     possible = 0,
     potentialBuyerValue = 0;
+  const matchRows: (typeof schema.projectMatches.$inferInsert)[] = [];
+  const reasonRows: (typeof schema.matchReasons.$inferInsert)[] = [];
 
   for (const { customer, result } of results) {
     const ai = aiExplanations.get(customer.id);
@@ -138,19 +143,21 @@ export async function runMatchingForProject(projectId: string, orgId: string, ac
     if (bucket === "none") continue;
 
     const matchId = newId("match");
-    await db.insert(schema.projectMatches).values({
+    const positivesList = cleanReasonList(ai?.positives?.length ? ai.positives : result.positives);
+    const concernsList = cleanReasonList(ai?.concerns?.length ? ai.concerns : result.concerns);
+    matchRows.push({
       id: matchId,
       projectId,
       customerId: customer.id,
       totalScore: adjustedScore,
       bucket,
       scoreBreakdownJson: result.breakdown,
-      concernsJson: ai?.concerns?.length ? ai.concerns : result.concerns,
+      concernsJson: concernsList,
       explanationSource: ai ? "ai" : "template",
     });
 
-    const reasonRows = [
-      ...(ai?.positives ?? result.positives).map((text, i) => ({
+    reasonRows.push(
+      ...positivesList.map((text, i) => ({
         id: newId("reason"),
         matchId,
         type: "positive" as const,
@@ -158,16 +165,15 @@ export async function runMatchingForProject(projectId: string, orgId: string, ac
         weight: 1,
         sortOrder: i,
       })),
-      ...(ai?.concerns ?? result.concerns).map((text, i) => ({
+      ...concernsList.map((text, i) => ({
         id: newId("reason"),
         matchId,
         type: "concern" as const,
         text,
         weight: 1,
         sortOrder: i,
-      })),
-    ];
-    if (reasonRows.length) await db.insert(schema.matchReasons).values(reasonRows);
+      }))
+    );
 
     if (bucket === "hot") hot++;
     else if (bucket === "warm") warm++;
@@ -178,6 +184,20 @@ export async function runMatchingForProject(projectId: string, orgId: string, ac
       potentialBuyerValue += inference?.inferredBudgetMax ?? prefs?.budgetMax ?? project.startingPrice ?? 0;
     }
   }
+
+  console.log(`  [match] writing ${matchRows.length} matches + ${reasonRows.length} reasons…`);
+  // Persist: clear old matches for this project, then insert fresh in batches (a single INSERT
+  // with thousands of rows can itself be slow/hit payload limits — 200 rows per statement keeps
+  // each round trip small while still cutting a 370-row write from ~370 round trips to ~2).
+  await db.delete(schema.projectMatches).where(eq(schema.projectMatches.projectId, projectId));
+  const CHUNK = 200;
+  for (let i = 0; i < matchRows.length; i += CHUNK) {
+    await db.insert(schema.projectMatches).values(matchRows.slice(i, i + CHUNK));
+  }
+  for (let i = 0; i < reasonRows.length; i += CHUNK) {
+    await db.insert(schema.matchReasons).values(reasonRows.slice(i, i + CHUNK));
+  }
+  console.log(`  [match] done writing`);
 
   await logAudit({
     orgId,
@@ -240,6 +260,12 @@ export interface MatchResultRow {
   budgetMin: number | null;
   budgetMax: number | null;
   budgetCurrency: string;
+  /** True when the budget shown is the AI-inferred value (from notes), not the stated/imported one —
+   *  the scoring engine prefers the inferred budget when available (see scoreMatch in score.ts), so
+   *  the card must say so explicitly. Otherwise a customer whose imported budget field is stale or
+   *  wrong (e.g. a bad CRM value) shows a high budget-fit score next to a number that looks like it
+   *  contradicts it, which reads as a bug in a demo even though the score itself is correct. */
+  budgetIsInferred: boolean;
   preferredLocations: string[];
   bedrooms: string[];
   purpose: string;
@@ -250,6 +276,43 @@ export interface MatchResultRow {
   scoreBreakdown: Record<string, { score: number; max: number }>;
   positives: string[];
   concerns: string[];
+  /** How many of the 5 core signals (budget, location, bedrooms, purpose, purchase readiness) are
+   *  actually known — stated or AI-inferred, doesn't matter which. This is deliberately separate
+   *  from the fit score: a mostly-blank profile and a genuinely-modest-fit profile can land on the
+   *  same score (both hit the "missing data" neutral defaults), but they mean very different things
+   *  to an agent deciding who to call first. */
+  knownSignalCount: number;
+  /** True when knownSignalCount is 0 or 1 — i.e. this score is close to a pure neutral-default
+   *  guess rather than a real evaluation. Surfaced in the UI so a thin profile is never confused
+   *  for a confirmed, evidence-based match. */
+  hasLimitedData: boolean;
+}
+
+/** Drops blank/whitespace-only entries. An AI-generated positives/concerns array can occasionally
+ *  contain an empty string for a bullet it decided not to fill in — that must never reach the
+ *  database or the UI as a reason with nothing after the checkmark. */
+function cleanReasonList(list: string[] | undefined | null): string[] {
+  return (list ?? []).map((s) => (typeof s === "string" ? s.trim() : "")).filter(Boolean);
+}
+
+/** Counts how many of the 5 core matching signals we actually have data for (stated or inferred),
+ *  independent of whether that data happens to fit the project. Used purely to flag "we barely know
+ *  anything about this person" — never fed into the score itself. */
+function countKnownSignals(
+  budgetMin: number | null,
+  budgetMax: number | null,
+  preferredLocations: string[],
+  bedrooms: string[],
+  prefs: typeof schema.customerPreferences.$inferSelect | undefined,
+  inference: typeof schema.customerInferences.$inferSelect | undefined
+): number {
+  const purposeKnown = (prefs?.purpose && prefs.purpose !== "unclear") || (inference?.inferredPurpose && inference.inferredPurpose !== "unclear");
+  const readinessKnown =
+    (prefs?.purchaseReadiness && prefs.purchaseReadiness !== "unknown") ||
+    (inference?.inferredPurchaseReadiness && inference.inferredPurchaseReadiness !== "unknown");
+  return [budgetMin != null || budgetMax != null, preferredLocations.length > 0, bedrooms.length > 0, Boolean(purposeKnown), Boolean(readinessKnown)].filter(
+    Boolean
+  ).length;
 }
 
 export async function getMatchResults(
@@ -269,13 +332,15 @@ export async function getMatchResults(
   if (matches.length === 0) return [];
 
   const customerIds = matches.map((m) => m.customerId);
-  const [customers, prefs, reasons] = await Promise.all([
+  const [customers, prefs, inferences, reasons] = await Promise.all([
     db.query.customers.findMany({ where: inArray(schema.customers.id, customerIds) }),
     db.query.customerPreferences.findMany({ where: inArray(schema.customerPreferences.customerId, customerIds) }),
+    db.query.customerInferences.findMany({ where: inArray(schema.customerInferences.customerId, customerIds) }),
     db.query.matchReasons.findMany({ where: inArray(schema.matchReasons.matchId, matches.map((m) => m.id)) }),
   ]);
   const customerById = new Map(customers.map((c) => [c.id, c]));
   const prefsById = new Map(prefs.map((p) => [p.customerId, p]));
+  const inferById = new Map(inferences.map((i) => [i.customerId, i]));
   const reasonsByMatch = new Map<string, { positives: string[]; concerns: string[] }>();
   for (const r of reasons) {
     if (!reasonsByMatch.has(r.matchId)) reasonsByMatch.set(r.matchId, { positives: [], concerns: [] });
@@ -285,7 +350,18 @@ export async function getMatchResults(
   let rows: MatchResultRow[] = matches.map((m) => {
     const c = customerById.get(m.customerId)!;
     const p = prefsById.get(m.customerId);
+    const inf = inferById.get(m.customerId);
     const r = reasonsByMatch.get(m.id) ?? { positives: [], concerns: [] };
+
+    // Mirror scoreMatch's own precedence (score.ts: inferredBudget ?? stated budget) so the card
+    // never shows a number that contradicts the score/explanation sitting right next to it.
+    const budgetIsInferred = inf?.inferredBudgetMin != null || inf?.inferredBudgetMax != null;
+    const budgetMin = inf?.inferredBudgetMin ?? p?.budgetMin ?? null;
+    const budgetMax = inf?.inferredBudgetMax ?? p?.budgetMax ?? null;
+    const preferredLocations = inf?.inferredLocations?.length ? inf.inferredLocations : p?.preferredLocations ?? [];
+    const bedrooms = inf?.inferredBedrooms?.length ? inf.inferredBedrooms : p?.bedrooms ?? [];
+    const knownSignalCount = countKnownSignals(budgetMin, budgetMax, preferredLocations, bedrooms, p, inf);
+
     return {
       matchId: m.id,
       customerId: c.id,
@@ -293,19 +369,22 @@ export async function getMatchResults(
       customerPhone: c.phone,
       totalScore: m.totalScore,
       bucket: m.bucket,
-      budgetMin: p?.budgetMin ?? null,
-      budgetMax: p?.budgetMax ?? null,
+      budgetMin,
+      budgetMax,
       budgetCurrency: p?.budgetCurrency ?? "AED",
-      preferredLocations: p?.preferredLocations ?? [],
-      bedrooms: p?.bedrooms ?? [],
+      budgetIsInferred,
+      preferredLocations,
+      bedrooms,
       purpose: p?.purpose ?? "unclear",
       lostReason: p?.lostReason ?? "",
       lastContactedAt: p?.lastContactedAt ?? null,
       latestSeenAt: c.latestSeenAt,
       outcomeStatus: m.outcomeStatus,
       scoreBreakdown: m.scoreBreakdownJson,
-      positives: r.positives,
-      concerns: m.concernsJson.length ? m.concernsJson : r.concerns,
+      positives: cleanReasonList(r.positives),
+      concerns: cleanReasonList(m.concernsJson.length ? m.concernsJson : r.concerns),
+      knownSignalCount,
+      hasLimitedData: knownSignalCount <= 1,
     };
   });
 
@@ -313,6 +392,15 @@ export async function getMatchResults(
     const q = filters.search.toLowerCase();
     rows = rows.filter((r) => r.customerName.toLowerCase().includes(q) || r.customerPhone.includes(q));
   }
+
+  // Within the same score, put leads we actually have some real signal on ahead of leads that are
+  // essentially a blank profile — both can land on an identical score (the "missing data" neutral
+  // defaults sum to a consistent number), but an agent working down the list should hit the ones
+  // with real evidence first, before the ones that are a pure "worth a discovery call" toss-up.
+  rows.sort((a, b) => {
+    if (b.totalScore !== a.totalScore) return b.totalScore - a.totalScore;
+    return Number(a.hasLimitedData) - Number(b.hasLimitedData);
+  });
 
   return rows;
 }
@@ -466,34 +554,81 @@ export async function runAiEnrichmentForImport(importJobId: string, orgId: strin
       },
     }));
 
+  console.log(`  [ai:notes] extracting buyer profiles for ${inputs.length} customers with notes…`);
   const profiles = await extractBuyerProfiles(inputs);
+  console.log(`  [ai:notes] writing ${profiles.size} extracted profile(s) to the database…`);
+
+  // customerId is unique on this table (one inference row per customer), so a single batched
+  // upsert replaces what used to be a per-customer "check if it exists, then insert-or-update" —
+  // two sequential round trips each, ~700 total for 350 customers. This was the exact same
+  // pattern already fixed in the import writer and the match writer; same fix here.
+  const inferenceRows = Array.from(profiles.entries()).map(([customerId, profile]) => ({
+    id: newId("infer"),
+    customerId,
+    inferredBudgetMin: profile.inferredBudgetMin,
+    inferredBudgetMax: profile.inferredBudgetMax,
+    inferredLocations: profile.inferredLocations,
+    inferredPropertyTypes: profile.inferredPropertyTypes,
+    inferredBedrooms: profile.inferredBedrooms,
+    inferredPurpose: profile.inferredPurpose,
+    inferredPaymentPreferences: profile.inferredPaymentPreferences,
+    inferredTimeline: profile.inferredTimeline,
+    inferredObjections: profile.inferredObjections,
+    inferredDeveloperPreferences: profile.inferredDeveloperPreferences,
+    inferredPurchaseReadiness: profile.inferredPurchaseReadiness,
+    profileConfidence: profile.profileConfidence,
+    aiSummary: profile.aiSummary,
+    evidenceJson: profile.evidence.map((e) => ({ field: e.field, value: e.value, confidence: e.confidence, sourceExcerpt: e.sourceExcerpt })),
+    lastInferredAt: new Date(),
+  }));
+
+  const upsertSet = {
+    inferredBudgetMin: rawSql`excluded.inferred_budget_min`,
+    inferredBudgetMax: rawSql`excluded.inferred_budget_max`,
+    inferredLocations: rawSql`excluded.inferred_locations`,
+    inferredPropertyTypes: rawSql`excluded.inferred_property_types`,
+    inferredBedrooms: rawSql`excluded.inferred_bedrooms`,
+    inferredPurpose: rawSql`excluded.inferred_purpose`,
+    inferredPaymentPreferences: rawSql`excluded.inferred_payment_preferences`,
+    inferredTimeline: rawSql`excluded.inferred_timeline`,
+    inferredObjections: rawSql`excluded.inferred_objections`,
+    inferredDeveloperPreferences: rawSql`excluded.inferred_developer_preferences`,
+    inferredPurchaseReadiness: rawSql`excluded.inferred_purchase_readiness`,
+    profileConfidence: rawSql`excluded.profile_confidence`,
+    aiSummary: rawSql`excluded.ai_summary`,
+    evidenceJson: rawSql`excluded.evidence_json`,
+    lastInferredAt: rawSql`excluded.last_inferred_at`,
+  };
+
   let enriched = 0;
-  for (const [customerId, profile] of profiles) {
-    const existing = await db.query.customerInferences.findFirst({ where: eq(schema.customerInferences.customerId, customerId) });
-    const values = {
-      inferredBudgetMin: profile.inferredBudgetMin,
-      inferredBudgetMax: profile.inferredBudgetMax,
-      inferredLocations: profile.inferredLocations,
-      inferredPropertyTypes: profile.inferredPropertyTypes,
-      inferredBedrooms: profile.inferredBedrooms,
-      inferredPurpose: profile.inferredPurpose,
-      inferredPaymentPreferences: profile.inferredPaymentPreferences,
-      inferredTimeline: profile.inferredTimeline,
-      inferredObjections: profile.inferredObjections,
-      inferredDeveloperPreferences: profile.inferredDeveloperPreferences,
-      inferredPurchaseReadiness: profile.inferredPurchaseReadiness,
-      profileConfidence: profile.profileConfidence,
-      aiSummary: profile.aiSummary,
-      evidenceJson: profile.evidence.map((e) => ({ field: e.field, value: e.value, confidence: e.confidence, sourceExcerpt: e.sourceExcerpt })),
-      lastInferredAt: new Date(),
-    };
-    if (existing) {
-      await db.update(schema.customerInferences).set(values).where(eq(schema.customerInferences.customerId, customerId));
-    } else {
-      await db.insert(schema.customerInferences).values({ id: newId("infer"), customerId, ...values });
+  const CHUNK = 200;
+  for (let i = 0; i < inferenceRows.length; i += CHUNK) {
+    const chunk = inferenceRows.slice(i, i + CHUNK);
+    try {
+      await db.insert(schema.customerInferences).values(chunk).onConflictDoUpdate({
+        target: schema.customerInferences.customerId,
+        set: upsertSet,
+      });
+      enriched += chunk.length;
+    } catch (err) {
+      // AI enrichment is an enhancement layer, never a dependency — if a whole chunk fails (e.g.
+      // one bad customerId among 200), fall back to writing that chunk one row at a time so a
+      // single bad row doesn't cost every other row in the batch its profile.
+      console.error(`  [ai:notes] chunk upsert failed, retrying its rows individually:`, err instanceof Error ? err.message : err);
+      for (const row of chunk) {
+        try {
+          await db.insert(schema.customerInferences).values(row).onConflictDoUpdate({
+            target: schema.customerInferences.customerId,
+            set: upsertSet,
+          });
+          enriched++;
+        } catch (rowErr) {
+          console.error(`  [ai:notes] failed to write inferred profile for customer ${row.customerId}:`, rowErr instanceof Error ? rowErr.message : rowErr);
+        }
+      }
     }
-    enriched++;
   }
+  console.log(`  [ai:notes] done writing`);
   return { enriched };
 }
 

@@ -28,13 +28,41 @@ export function detectColumns(
   return headers.map((header) => detectOneColumn(header, columnSamples[header] ?? []));
 }
 
+/** Columns that are clearly internal record identifiers (Opportunity ID, Contact ID, Pipeline Stage ID...)
+ *  should never be guessed into name/phone/email/status/date fields — we have no use for a raw internal
+ *  ID today, and matching one in by accident (e.g. an alphanumeric CRM ID landing in "phone") silently
+ *  corrupts dedupe. Always leave these unmapped for manual review instead of guessing. */
+function isLikelyIdentifierColumn(headerKey: string): boolean {
+  return /(^|_)(id|uuid|guid|ref|reference)(_|$)/.test(headerKey);
+}
+
+/** Token overlap (Jaccard-ish) between two normalized, underscore-joined keys. */
+function keyTokenOverlap(aKey: string, bKey: string): number {
+  const ta = new Set(aKey.split("_").filter(Boolean));
+  const tb = new Set(bKey.split("_").filter(Boolean));
+  if (ta.size === 0 || tb.size === 0) return 0;
+  let overlap = 0;
+  for (const t of ta) if (tb.has(t)) overlap++;
+  return overlap / Math.max(ta.size, tb.size);
+}
+
 function detectOneColumn(header: string, samples: string[]): ColumnDetection {
   const headerKey = normalizeKey(header);
+
+  if (isLikelyIdentifierColumn(headerKey)) {
+    return { sourceColumn: header, detectedField: "unmapped", confidence: 0.1, method: "deterministic", sampleValues: samples };
+  }
+
   let best: { field: CanonicalFieldKey; confidence: number; method: ColumnDetection["method"] } | null =
     null;
 
   for (const field of CANONICAL_FIELDS) {
-    // 1. Deterministic exact/substring alias match.
+    // 1. Deterministic exact/substring alias match. Substring hits are weighted by how much of the
+    // (longer of the two) string the alias actually covers, so a short generic alias like "name" loosely
+    // contained inside a longer, more specific header ("lost reason name") doesn't outrank — or
+    // arbitrarily tie with — a longer, more specific alias ("lost reason") that also matches. Without
+    // this, ties were broken by field declaration order, which is what caused "lost reason name" to be
+    // guessed as the customer's name.
     let headerScore = 0;
     let method: ColumnDetection["method"] = "deterministic";
     for (const alias of [field.label, ...field.aliases]) {
@@ -43,14 +71,24 @@ function detectOneColumn(header: string, samples: string[]): ColumnDetection {
       if (headerKey === aliasKey) {
         headerScore = Math.max(headerScore, 0.97);
       } else if (aliasKey.length >= 3 && (headerKey.includes(aliasKey) || aliasKey.includes(headerKey))) {
-        headerScore = Math.max(headerScore, 0.82);
+        const coverage = Math.min(aliasKey.length, headerKey.length) / Math.max(aliasKey.length, headerKey.length);
+        headerScore = Math.max(headerScore, 0.82 * coverage);
       }
     }
 
-    // 2. Fuzzy header similarity if no strong deterministic hit yet.
+    // 2. Fuzzy header similarity if no strong deterministic hit yet. For multi-token strings, plain
+    // character-level Levenshtein similarity is unreliable — "Lead Value" and "lead date" are ~80%
+    // similar character-by-character despite meaning nothing alike. Require genuine token overlap too
+    // whenever either side has more than one token.
     if (headerScore < 0.6) {
       let fuzzyBest = 0;
       for (const alias of [field.label, ...field.aliases]) {
+        const aliasKey = normalizeKey(alias);
+        const isMultiToken = headerKey.includes("_") || aliasKey.includes("_");
+        // Strictly greater than half: a single shared generic word ("lead" in "lead value" vs
+        // "lead name") is not enough evidence on its own — the other, differentiating token(s) still
+        // have to actually agree for a multi-token fuzzy match to mean anything.
+        if (isMultiToken && keyTokenOverlap(headerKey, aliasKey) <= 0.5) continue;
         fuzzyBest = Math.max(fuzzyBest, similarityRatio(header, alias));
       }
       if (fuzzyBest >= FUZZY_THRESHOLD && fuzzyBest * 0.9 > headerScore) {
@@ -116,7 +154,12 @@ export async function refineUnmappedColumnsWithAi(
     columns: Array<{ header: string; samples: string[] }>
   ) => Promise<Array<{ header: string; field: CanonicalFieldKey; confidence: number } | null>>
 ): Promise<ColumnDetection[]> {
-  const ambiguous = detections.filter((d) => d.confidence < 0.6);
+  // Exclude columns the deterministic pass deliberately refused to map because they look like
+  // internal record identifiers (Contact ID, Pipeline Stage ID...) — that refusal is intentional,
+  // not a low-confidence guess to improve on. Sending them to the AI anyway defeats the point:
+  // a model with no visibility into that rule can "rescue" a raw UUID into a plausible-sounding
+  // wrong field (e.g. guessing a Pipeline Stage ID's UUID value is a "Status").
+  const ambiguous = detections.filter((d) => d.confidence < 0.6 && !isLikelyIdentifierColumn(normalizeKey(d.sourceColumn)));
   if (ambiguous.length === 0) return detections;
 
   const results = await classifyBatch(

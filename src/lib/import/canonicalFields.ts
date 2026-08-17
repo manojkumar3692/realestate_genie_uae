@@ -42,8 +42,22 @@ export interface CanonicalFieldDef {
 
 const isLikelyPhone = (s: string) => /^[\d+\s().-]{7,20}$/.test(s.trim()) && /\d{6,}/.test(s.replace(/\D/g, ""));
 const isLikelyEmail = (s: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s.trim());
-const isLikelyDate = (s: string) =>
-  /^\d{1,4}[-/]\d{1,2}[-/]\d{1,4}$/.test(s.trim()) || !Number.isNaN(Date.parse(s.trim()));
+const isLikelyDate = (s: string) => {
+  const v = s.trim();
+  if (!v) return false;
+  // Numeric date shapes (2024-01-15, 15/01/2024, ISO timestamps...).
+  if (/^\d{1,4}[-/]\d{1,2}[-/]\d{1,4}([t ]\d{1,2}:\d{2}(:\d{2})?(\.\d+)?(z|[+-]\d{2}:?\d{2})?)?$/i.test(v)) return true;
+  // Textual dates ("15 Jan 2024", "January 15, 2024") — require a recognizable month name so
+  // bare numbers/IDs (which JS's loose Date.parse happily "parses") are never treated as dates.
+  if (
+    /\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b/i.test(v) &&
+    /\d{1,4}/.test(v) &&
+    !Number.isNaN(Date.parse(v))
+  ) {
+    return true;
+  }
+  return false;
+};
 const isLikelyBudget = (s: string) =>
   /\b(aed|usd|inr|\$|₹|k|m|mn|million|lakh|lac|crore|cr)\b/i.test(s) || /\d{5,}/.test(s.replace(/[,\s]/g, ""));
 const isLikelyBedrooms = (s: string) => /\b(studio|\d\s?(br|bed|bhk|bedroom))\b/i.test(s.trim());
