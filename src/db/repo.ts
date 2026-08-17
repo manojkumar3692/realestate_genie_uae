@@ -1,471 +1,768 @@
-import { randomUUID } from "crypto";
-import { desc, eq } from "drizzle-orm";
-import { db, sql } from "./client";
-import {
-  comparableProjects,
-  financialAssumptions,
-  firmSettings,
-  generatedReports,
-  paymentMilestones,
-  projectDirectory,
-  projects,
-  unitTypes,
-} from "./schema";
-import type {
-  ComparableProjectInput,
-  FinancialAssumptionsInput,
-  FirmSettingsInput,
-  PaymentMilestoneInput,
-  ProjectBundle,
-  ProjectDirectoryMatch,
-  ProjectInput,
-  UnitTypeInput,
-} from "@/lib/types";
+import { and, desc, eq, inArray, sql as rawSql } from "drizzle-orm";
+import { db } from "./client";
+import * as schema from "./schema";
+import { newId } from "@/lib/id";
+import { normalizeSource } from "@/lib/normalize/source";
+import { normalizeWhitespace, normalizeKey } from "@/lib/normalize/text";
+import { findDuplicateCandidates, type IdentityCandidate } from "@/lib/import/dedupe";
+import { normalizeRow, type NormalizedRow } from "@/lib/import/normalizeRow";
+import type { ColumnDetection } from "@/lib/import/detectColumns";
+import { logAudit } from "@/lib/audit";
 
-/* -------------------------------------------------------------------------- */
-/* Firm settings (singleton)                                                  */
-/* -------------------------------------------------------------------------- */
+// ---------------------------------------------------------------------------
+// Sources & campaigns
+// ---------------------------------------------------------------------------
 
-export async function getFirmSettings(): Promise<FirmSettingsInput> {
-  const rows = await db.select().from(firmSettings).where(eq(firmSettings.id, 1)).limit(1);
-  if (rows[0]) return rows[0] as unknown as FirmSettingsInput;
-
-  await db.insert(firmSettings).values({ id: 1 }).onConflictDoNothing();
-  const created = await db.select().from(firmSettings).where(eq(firmSettings.id, 1)).limit(1);
-  return created[0] as unknown as FirmSettingsInput;
+export async function getOrCreateSource(orgId: string, rawSource: string) {
+  const normalized = normalizeSource(rawSource);
+  const key = normalizeKey(normalized.displayName || "unknown");
+  const existing = await db.query.sources.findFirst({
+    where: and(eq(schema.sources.orgId, orgId), eq(schema.sources.normalizedName, key)),
+  });
+  if (existing) return existing;
+  const row = {
+    id: newId("src"),
+    orgId,
+    name: normalized.displayName,
+    normalizedName: key,
+    platform: normalized.platform,
+  };
+  await db.insert(schema.sources).values(row).onConflictDoNothing();
+  return (
+    (await db.query.sources.findFirst({
+      where: and(eq(schema.sources.orgId, orgId), eq(schema.sources.normalizedName, key)),
+    })) ?? row
+  );
 }
 
-export async function updateFirmSettings(input: Partial<FirmSettingsInput>) {
-  await getFirmSettings(); // ensure row exists
-  await db
-    .update(firmSettings)
-    .set({ ...input, updatedAt: new Date().toISOString() } as any)
-    .where(eq(firmSettings.id, 1));
-  return getFirmSettings();
+export async function getOrCreateCampaign(orgId: string, sourceId: string | null, rawCampaign: string) {
+  const name = normalizeWhitespace(rawCampaign);
+  if (!name) return null;
+  const key = normalizeKey(name);
+  const existing = await db.query.campaigns.findFirst({
+    where: and(eq(schema.campaigns.orgId, orgId), eq(schema.campaigns.normalizedName, key)),
+  });
+  if (existing) return existing;
+  const row = { id: newId("cmp"), orgId, sourceId, name, normalizedName: key };
+  await db.insert(schema.campaigns).values(row).onConflictDoNothing();
+  return row;
 }
 
-/* -------------------------------------------------------------------------- */
-/* Project list (dashboard)                                                   */
-/* -------------------------------------------------------------------------- */
+// ---------------------------------------------------------------------------
+// Import jobs
+// ---------------------------------------------------------------------------
 
-export interface ProjectSummary {
-  id: string;
-  name: string;
-  developer: string;
-  area: string;
-  status: string;
-  currency: string;
-  updatedAt: string;
-  unitTypeCount: number;
-  priceFrom: number | null;
-  priceTo: number | null;
-  reportCount: number;
-}
-
-export async function listProjects(): Promise<ProjectSummary[]> {
-  const rows = await sql<ProjectSummary[]>`
-    SELECT
-      p.id, p.name, p.developer, p.area, p.status, p.currency, p.updated_at as "updatedAt",
-      (SELECT COUNT(*)::int FROM unit_types u WHERE u.project_id = p.id) as "unitTypeCount",
-      (SELECT MIN(price_from) FROM unit_types u WHERE u.project_id = p.id AND u.price_from > 0) as "priceFrom",
-      (SELECT MAX(price_to) FROM unit_types u WHERE u.project_id = p.id) as "priceTo",
-      (SELECT COUNT(*)::int FROM generated_reports r WHERE r.project_id = p.id) as "reportCount"
-    FROM projects p
-    ORDER BY p.updated_at DESC
-  `;
-  return rows;
-}
-
-/* -------------------------------------------------------------------------- */
-/* Create / delete                                                            */
-/* -------------------------------------------------------------------------- */
-
-export async function createDraftProject(name: string = "Untitled Project"): Promise<string> {
-  await assertProjectNameAvailable(name, "");
-  const id = randomUUID();
-  const now = new Date().toISOString();
-  await db.insert(projects).values({ id, name, createdAt: now, updatedAt: now });
-  await db.insert(financialAssumptions).values({ id: randomUUID(), projectId: id });
+export async function createImportJob(input: {
+  orgId: string;
+  createdBy: string;
+  fileName: string;
+  fileType: "csv" | "xlsx";
+  sheetName: string;
+  headerRowIndex: number;
+  rowCount: number;
+}) {
+  const id = newId("import");
+  await db.insert(schema.importJobs).values({
+    id,
+    orgId: input.orgId,
+    createdBy: input.createdBy,
+    fileName: input.fileName,
+    fileType: input.fileType,
+    sheetName: input.sheetName,
+    headerRowIndex: input.headerRowIndex,
+    rowCount: input.rowCount,
+    status: "parsing",
+    progressJson: { stage: "parsing", processed: 0, total: input.rowCount },
+  });
   return id;
 }
 
-export async function deleteProject(id: string) {
-  await db.delete(projects).where(eq(projects.id, id));
+export async function saveColumnMappings(importJobId: string, detections: ColumnDetection[]) {
+  await db.delete(schema.columnMappings).where(eq(schema.columnMappings.importJobId, importJobId));
+  if (detections.length === 0) return;
+  await db.insert(schema.columnMappings).values(
+    detections.map((d, i) => ({
+      id: newId("colmap"),
+      importJobId,
+      sourceColumn: d.sourceColumn,
+      sampleValuesJson: d.sampleValues,
+      detectedField: d.detectedField,
+      confidence: d.confidence,
+      method: d.method,
+      accepted: d.detectedField !== "unmapped",
+      ignored: d.detectedField === "unmapped",
+      sortOrder: i,
+    }))
+  );
+  await db
+    .update(schema.importJobs)
+    .set({ status: "mapping_review" })
+    .where(eq(schema.importJobs.id, importJobId));
 }
 
-/* -------------------------------------------------------------------------- */
-/* Full bundle read                                                           */
-/* -------------------------------------------------------------------------- */
+export async function getImportJob(importJobId: string, orgId: string) {
+  return db.query.importJobs.findFirst({
+    where: and(eq(schema.importJobs.id, importJobId), eq(schema.importJobs.orgId, orgId)),
+  });
+}
 
-export async function getProjectBundle(id: string): Promise<ProjectBundle | null> {
-  const projectRows = await db.select().from(projects).where(eq(projects.id, id)).limit(1);
-  const project = projectRows[0];
-  if (!project) return null;
+export async function listImportJobs(orgId: string) {
+  return db.query.importJobs.findMany({
+    where: eq(schema.importJobs.orgId, orgId),
+    orderBy: desc(schema.importJobs.createdAt),
+  });
+}
 
-  const [units, milestones, comparables, financialsRows, firm] = await Promise.all([
-    db.select().from(unitTypes).where(eq(unitTypes.projectId, id)).orderBy(unitTypes.sortOrder),
-    db.select().from(paymentMilestones).where(eq(paymentMilestones.projectId, id)).orderBy(paymentMilestones.sortOrder),
-    db.select().from(comparableProjects).where(eq(comparableProjects.projectId, id)).orderBy(comparableProjects.sortOrder),
-    db.select().from(financialAssumptions).where(eq(financialAssumptions.projectId, id)).limit(1),
-    getFirmSettings(),
+export async function getColumnMappings(importJobId: string) {
+  return db.query.columnMappings.findMany({
+    where: eq(schema.columnMappings.importJobId, importJobId),
+    orderBy: schema.columnMappings.sortOrder,
+  });
+}
+
+export async function updateColumnMapping(
+  id: string,
+  patch: Partial<{ detectedField: string; accepted: boolean; ignored: boolean }>
+) {
+  await db.update(schema.columnMappings).set(patch).where(eq(schema.columnMappings.id, id));
+}
+
+export async function updateImportJobProgress(
+  importJobId: string,
+  patch: Partial<{
+    status: (typeof schema.importJobs.$inferInsert)["status"];
+    progressJson: { stage: string; processed: number; total: number };
+    statsJson: Record<string, number>;
+    errorMessage: string | null;
+    completedAt: Date;
+  }>
+) {
+  await db.update(schema.importJobs).set(patch).where(eq(schema.importJobs.id, importJobId));
+}
+
+export async function deleteImportJob(importJobId: string, orgId: string) {
+  await db
+    .delete(schema.importJobs)
+    .where(and(eq(schema.importJobs.id, importJobId), eq(schema.importJobs.orgId, orgId)));
+}
+
+// ---------------------------------------------------------------------------
+// Import row processing — raw storage, normalization, identity resolution
+// ---------------------------------------------------------------------------
+
+export interface ImportRunResult {
+  totalRows: number;
+  uniqueCustomers: number;
+  newCustomers: number;
+  updatedCustomers: number;
+  confirmedDuplicatesMerged: number;
+  possibleDuplicateGroups: number;
+  withPhone: number;
+  withUsableIntent: number;
+  withBudget: number;
+  withLocation: number;
+  withNotes: number;
+  insufficientData: number;
+}
+
+/**
+ * Runs the full import pipeline for one sheet: stores raw rows (never
+ * mutated afterward), normalizes them deterministically, resolves customer
+ * identity against both the batch itself and the org's existing customers,
+ * and writes the normalized + timeline layers. AI note extraction is a
+ * separate follow-up step (runAiEnrichmentForImport) so this stays fast and
+ * fully functional with no AI key configured.
+ */
+/** Step 1, run at upload time (before the user reviews column mapping) — raw values are never touched again after this. */
+export async function storeRawImportRows(importJobId: string, rows: Record<string, string>[]): Promise<string[]> {
+  const rawRowIds = rows.map(() => newId("row"));
+  const BATCH = 500;
+  for (let i = 0; i < rows.length; i += BATCH) {
+    const chunk = rows.slice(i, i + BATCH).map((r, j) => ({
+      id: rawRowIds[i + j],
+      importJobId,
+      rowIndex: i + j,
+      rawJson: r,
+      status: "pending" as const,
+    }));
+    await db.insert(schema.importedRows).values(chunk);
+  }
+  return rawRowIds;
+}
+
+export async function getRawImportRows(importJobId: string) {
+  return db.query.importedRows.findMany({
+    where: eq(schema.importedRows.importJobId, importJobId),
+    orderBy: schema.importedRows.rowIndex,
+  });
+}
+
+/**
+ * Step 2 onward, run once the user confirms the column mapping. Reads the
+ * raw rows already stored by storeRawImportRows (never re-parses the
+ * original file), so nothing here can ever mutate a raw value.
+ */
+export async function runImportPipeline(
+  orgId: string,
+  importJobId: string,
+  mappings: ColumnDetection[]
+): Promise<ImportRunResult> {
+  const acceptedMappings = mappings.filter((m) => m.detectedField !== "unmapped");
+
+  const rawRows = await getRawImportRows(importJobId);
+  const rows = rawRows.map((r) => r.rawJson);
+  const rawRowIds = rawRows.map((r) => r.id);
+
+  await updateImportJobProgress(importJobId, {
+    status: "normalizing",
+    progressJson: { stage: "normalizing", processed: 0, total: rows.length },
+  });
+
+  // 2. Deterministic normalization.
+  const normalized: NormalizedRow[] = rows.map((r) => normalizeRow(r, acceptedMappings));
+
+  // 3. Resolve source/campaign dictionary entries (small cardinality — sequential is fine).
+  const sourceCache = new Map<string, Awaited<ReturnType<typeof getOrCreateSource>>>();
+  const campaignCache = new Map<string, Awaited<ReturnType<typeof getOrCreateCampaign>>>();
+  for (const n of normalized) {
+    const skey = n.source.displayName || "unknown";
+    if (!sourceCache.has(skey)) sourceCache.set(skey, await getOrCreateSource(orgId, n.source.original));
+    if (n.campaignRaw) {
+      const ckey = n.campaignRaw;
+      if (!campaignCache.has(ckey)) {
+        const source = sourceCache.get(skey)!;
+        campaignCache.set(ckey, await getOrCreateCampaign(orgId, source.id, n.campaignRaw));
+      }
+    }
+  }
+
+  // 4. Identity resolution against existing org customers + within this batch.
+  await updateImportJobProgress(importJobId, {
+    status: "deduplicating",
+    progressJson: { stage: "deduplicating", processed: 0, total: rows.length },
+  });
+
+  const existingCustomers = await db.query.customers.findMany({
+    where: eq(schema.customers.orgId, orgId),
+    columns: { id: true, name: true, normalizedPhone: true, normalizedEmail: true },
+  });
+
+  const candidates: IdentityCandidate[] = [
+    ...existingCustomers.map((c) => ({
+      id: `existing:${c.id}`,
+      name: c.name,
+      normalizedPhone: c.normalizedPhone,
+      normalizedEmail: c.normalizedEmail,
+    })),
+    ...normalized.map((n, i) => ({
+      id: `new:${i}`,
+      name: n.name,
+      normalizedPhone: n.normalizedPhone,
+      normalizedEmail: n.normalizedEmail,
+    })),
+  ];
+
+  const pairs = findDuplicateCandidates(candidates);
+  const confirmed = pairs.filter((p) => p.confidenceLevel === "confirmed");
+  const reviewable = pairs.filter((p) => p.confidenceLevel !== "confirmed");
+
+  // Union confirmed pairs into merge groups.
+  const parent = new Map<string, string>();
+  const find = (x: string): string => {
+    if (!parent.has(x)) parent.set(x, x);
+    let root = x;
+    while (parent.get(root) !== root) root = parent.get(root)!;
+    return root;
+  };
+  const union = (a: string, b: string) => {
+    const ra = find(a);
+    const rb = find(b);
+    if (ra !== rb) parent.set(ra, rb);
+  };
+  for (const p of confirmed) union(p.aId, p.bId);
+
+  const groups = new Map<string, string[]>();
+  for (const c of candidates) {
+    const root = find(c.id);
+    if (!groups.has(root)) groups.set(root, []);
+    groups.get(root)!.push(c.id);
+  }
+
+  // Map each row index -> target customer id (existing or freshly created).
+  const rowIndexToCustomerId = new Map<number, string>();
+  const newCustomerIds: string[] = [];
+  let confirmedDuplicatesMerged = 0;
+
+  for (const members of groups.values()) {
+    const existingIds = members.filter((m) => m.startsWith("existing:")).map((m) => m.slice("existing:".length));
+    const newIndexes = members
+      .filter((m) => m.startsWith("new:"))
+      .map((m) => parseInt(m.slice("new:".length), 10));
+
+    let targetId: string;
+    if (existingIds.length > 0) {
+      targetId = existingIds[0];
+      confirmedDuplicatesMerged += newIndexes.length + Math.max(0, existingIds.length - 1);
+    } else {
+      targetId = newId("cust");
+      newCustomerIds.push(targetId);
+      confirmedDuplicatesMerged += Math.max(0, newIndexes.length - 1);
+    }
+    for (const idx of newIndexes) rowIndexToCustomerId.set(idx, targetId);
+  }
+
+  // 5. Write customers, identities, source records, interactions, preferences.
+  await updateImportJobProgress(importJobId, {
+    status: "normalizing",
+    progressJson: { stage: "writing customer records", processed: 0, total: rows.length },
+  });
+
+  const newCustomerIdSet = new Set(newCustomerIds);
+  let updatedExistingCount = 0;
+  let processed = 0;
+
+  for (let i = 0; i < normalized.length; i++) {
+    const n = normalized[i];
+    const customerId = rowIndexToCustomerId.get(i)!;
+    const isNew = newCustomerIdSet.has(customerId);
+    const leadDate = n.leadCreatedDate ?? new Date();
+
+    if (isNew) {
+      await db
+        .insert(schema.customers)
+        .values({
+          id: customerId,
+          orgId,
+          name: n.name,
+          phone: n.rawPhone,
+          normalizedPhone: n.normalizedPhone,
+          email: n.email,
+          normalizedEmail: n.normalizedEmail,
+          nationality: n.nationality,
+          status: inferCustomerStatus(n),
+          doNotContact: /do not contact|opted out|dnc/i.test(n.previousStatus + " " + n.agentNotes),
+          firstSeenAt: leadDate,
+          latestSeenAt: leadDate,
+        })
+        .onConflictDoNothing();
+      newCustomerIdSet.delete(customerId); // subsequent rows in the same group are treated as updates
+    } else {
+      updatedExistingCount++;
+      await db
+        .update(schema.customers)
+        .set({
+          name: rawSql`CASE WHEN ${schema.customers.name} = '' THEN ${n.name} ELSE ${schema.customers.name} END`,
+          phone: n.rawPhone ? n.rawPhone : rawSql`${schema.customers.phone}`,
+          normalizedPhone: n.normalizedPhone ? n.normalizedPhone : rawSql`${schema.customers.normalizedPhone}`,
+          email: n.email ? n.email : rawSql`${schema.customers.email}`,
+          normalizedEmail: n.normalizedEmail ? n.normalizedEmail : rawSql`${schema.customers.normalizedEmail}`,
+          latestSeenAt: leadDate,
+          updatedAt: new Date(),
+        })
+        .where(eq(schema.customers.id, customerId));
+    }
+
+    // Identities (dedup within customer).
+    if (n.normalizedPhone) {
+      await upsertIdentity(customerId, "phone", n.rawPhone, n.normalizedPhone);
+    }
+    if (n.normalizedEmail) {
+      await upsertIdentity(customerId, "email", n.email, n.normalizedEmail);
+    }
+
+    // Source record.
+    const source = sourceCache.get(n.source.displayName || "unknown");
+    const campaign = n.campaignRaw ? campaignCache.get(n.campaignRaw) : null;
+    await db.insert(schema.customerSourceRecords).values({
+      id: newId("srcrec"),
+      customerId,
+      importJobId,
+      importedRowId: rawRowIds[i],
+      sourceId: source?.id ?? null,
+      campaignId: campaign?.id ?? null,
+      rawSourceText: n.source.original,
+      rawCampaignText: n.campaignRaw,
+      leadDate,
+    });
+
+    // Timeline entry.
+    await db.insert(schema.customerInteractions).values({
+      id: newId("interaction"),
+      customerId,
+      occurredAt: leadDate,
+      channel: "import",
+      summary: buildInteractionSummary(n),
+      rawNote: n.agentNotes,
+      projectMentioned: n.interestedProjects[0] ?? "",
+    });
+
+    // Normalized preferences layer — last-write-wins on scalars, union on arrays.
+    await upsertPreferences(customerId, n);
+
+    // Link the raw row back to its resolved customer.
+    await db
+      .update(schema.importedRows)
+      .set({ status: "normalized", customerId })
+      .where(eq(schema.importedRows.id, rawRowIds[i]));
+
+    processed++;
+    if (processed % 200 === 0) {
+      await updateImportJobProgress(importJobId, {
+        progressJson: { stage: "writing customer records", processed, total: rows.length },
+      });
+    }
+  }
+
+  // 6. Store reviewable (probable/possible) duplicate candidates.
+  let possibleDuplicateGroups = 0;
+  for (const p of reviewable) {
+    const aCustomerId = resolveCandidateId(p.aId, rowIndexToCustomerId);
+    const bCustomerId = resolveCandidateId(p.bId, rowIndexToCustomerId);
+    if (!aCustomerId || !bCustomerId || aCustomerId === bCustomerId) continue;
+    await db.insert(schema.duplicateCandidates).values({
+      id: newId("dupe"),
+      orgId,
+      customerAId: aCustomerId,
+      customerBId: bCustomerId,
+      matchType: p.matchType,
+      confidenceLevel: p.confidenceLevel,
+      score: p.score,
+    });
+    possibleDuplicateGroups++;
+  }
+
+  // 7. Stats.
+  const stats: ImportRunResult = {
+    totalRows: rows.length,
+    uniqueCustomers: new Set(rowIndexToCustomerId.values()).size,
+    newCustomers: newCustomerIds.length,
+    updatedCustomers: updatedExistingCount,
+    confirmedDuplicatesMerged,
+    possibleDuplicateGroups,
+    withPhone: normalized.filter((n) => n.normalizedPhone).length,
+    withUsableIntent: normalized.filter(
+      (n) => n.budget.min || n.budget.max || n.preferredLocations.length || n.bedrooms.length
+    ).length,
+    withBudget: normalized.filter((n) => n.budget.min !== null || n.budget.max !== null).length,
+    withLocation: normalized.filter((n) => n.preferredLocations.length > 0).length,
+    withNotes: normalized.filter((n) => n.agentNotes.trim().length > 10).length,
+    insufficientData: normalized.filter(
+      (n) => !n.normalizedPhone && !n.email && !n.budget.min && !n.budget.max && n.preferredLocations.length === 0
+    ).length,
+  };
+
+  await updateImportJobProgress(importJobId, {
+    status: "completed",
+    statsJson: stats as unknown as Record<string, number>,
+    progressJson: { stage: "completed", processed: rows.length, total: rows.length },
+    completedAt: new Date(),
+  });
+
+  return stats;
+}
+
+function resolveCandidateId(id: string, rowIndexToCustomerId: Map<number, string>): string | null {
+  if (id.startsWith("existing:")) return id.slice("existing:".length);
+  if (id.startsWith("new:")) return rowIndexToCustomerId.get(parseInt(id.slice("new:".length), 10)) ?? null;
+  return null;
+}
+
+function inferCustomerStatus(n: NormalizedRow): (typeof schema.customers.$inferInsert)["status"] {
+  const text = (n.previousStatus + " " + n.agentNotes).toLowerCase();
+  if (/invalid|spam|wrong number/.test(text)) return "invalid";
+  if (/do not contact|opted out|dnc/.test(text)) return "do_not_contact";
+  if (/\bwon\b|purchased|booked/.test(text)) return "won";
+  if (/lost/.test(text)) return "lost";
+  if (n.lastContactedDate || n.agentNotes) return "contacted";
+  return "new";
+}
+
+function buildInteractionSummary(n: NormalizedRow): string {
+  const parts: string[] = [];
+  if (n.source.displayName) parts.push(`${n.source.displayName} lead`);
+  if (n.interestedProjects[0]) parts.push(`interested in ${n.interestedProjects[0]}`);
+  if (n.budget.min || n.budget.max) {
+    parts.push(`budget ${n.budget.currency ?? "AED"} ${(n.budget.max ?? n.budget.min)?.toLocaleString()}`);
+  }
+  return parts.join(", ") || "Imported record";
+}
+
+async function upsertIdentity(customerId: string, type: "phone" | "email", value: string, normalizedValue: string) {
+  if (!normalizedValue) return;
+  const existing = await db.query.customerIdentities.findFirst({
+    where: and(
+      eq(schema.customerIdentities.customerId, customerId),
+      eq(schema.customerIdentities.type, type),
+      eq(schema.customerIdentities.normalizedValue, normalizedValue)
+    ),
+  });
+  if (existing) return;
+  const isFirst = !(await db.query.customerIdentities.findFirst({
+    where: and(eq(schema.customerIdentities.customerId, customerId), eq(schema.customerIdentities.type, type)),
+  }));
+  await db.insert(schema.customerIdentities).values({
+    id: newId("ident"),
+    customerId,
+    type,
+    value,
+    normalizedValue,
+    isPrimary: isFirst,
+  });
+}
+
+async function upsertPreferences(customerId: string, n: NormalizedRow) {
+  const existing = await db.query.customerPreferences.findFirst({
+    where: eq(schema.customerPreferences.customerId, customerId),
+  });
+
+  const merged = {
+    budgetMin: n.budget.min ?? existing?.budgetMin ?? null,
+    budgetMax: n.budget.max ?? existing?.budgetMax ?? null,
+    budgetCurrency: n.budget.currency ?? existing?.budgetCurrency ?? "AED",
+    preferredLocations: mergeArrays(existing?.preferredLocations, n.preferredLocations),
+    interestedProjects: mergeArrays(existing?.interestedProjects, n.interestedProjects),
+    preferredDevelopers: mergeArrays(existing?.preferredDevelopers, n.preferredDevelopers),
+    bedrooms: mergeArrays(existing?.bedrooms, n.bedrooms),
+    propertyTypes: mergeArrays(existing?.propertyTypes, n.propertyTypes),
+    purpose: n.purpose !== "unclear" ? n.purpose : existing?.purpose ?? "unclear",
+    purchaseTimeline: n.purchaseTimeline || existing?.purchaseTimeline || "",
+    paymentPlanPreference: n.paymentPlanPreference || existing?.paymentPlanPreference || "",
+    readyOrOffplanPreference:
+      n.readyOrOffplanPreference !== "either" ? n.readyOrOffplanPreference : existing?.readyOrOffplanPreference ?? "either",
+    purchaseReadiness: n.purchaseReadiness !== "unknown" ? n.purchaseReadiness : existing?.purchaseReadiness ?? "unknown",
+    previousStatus: n.previousStatus || existing?.previousStatus || "",
+    lostReason: n.lostReason || existing?.lostReason || "",
+    lastContactedAt: n.lastContactedDate ?? existing?.lastContactedAt ?? null,
+    updatedAt: new Date(),
+  };
+
+  if (existing) {
+    await db.update(schema.customerPreferences).set(merged).where(eq(schema.customerPreferences.customerId, customerId));
+  } else {
+    await db.insert(schema.customerPreferences).values({ id: newId("pref"), customerId, ...merged });
+  }
+}
+
+function mergeArrays(existing: string[] | undefined, fresh: string[]): string[] {
+  return Array.from(new Set([...(existing ?? []), ...fresh].filter(Boolean)));
+}
+
+// ---------------------------------------------------------------------------
+// Customers — read APIs
+// ---------------------------------------------------------------------------
+
+export async function getCustomerDetail(customerId: string, orgId: string) {
+  const customer = await db.query.customers.findFirst({
+    where: and(eq(schema.customers.id, customerId), eq(schema.customers.orgId, orgId)),
+  });
+  if (!customer) return null;
+
+  const [preferences, inferences, interactions, sourceRecords] = await Promise.all([
+    db.query.customerPreferences.findFirst({ where: eq(schema.customerPreferences.customerId, customerId) }),
+    db.query.customerInferences.findFirst({ where: eq(schema.customerInferences.customerId, customerId) }),
+    db.query.customerInteractions.findMany({
+      where: eq(schema.customerInteractions.customerId, customerId),
+      orderBy: desc(schema.customerInteractions.occurredAt),
+    }),
+    db.query.customerSourceRecords.findMany({ where: eq(schema.customerSourceRecords.customerId, customerId) }),
   ]);
 
-  let financials = financialsRows[0];
-  if (!financials) {
-    await db.insert(financialAssumptions).values({ id: randomUUID(), projectId: id });
-    const refreshed = await db.select().from(financialAssumptions).where(eq(financialAssumptions.projectId, id)).limit(1);
-    financials = refreshed[0];
-  }
-
-  return {
-    project: {
-      ...project,
-      amenities: safeParseArray(project.amenities),
-    } as unknown as ProjectInput,
-    unitTypes: units as unknown as UnitTypeInput[],
-    paymentMilestones: milestones as unknown as PaymentMilestoneInput[],
-    comparableProjects: comparables.map((c) => ({
-      ...c,
-      priceHistory: safeParseArray(c.priceHistory),
-    })) as unknown as ComparableProjectInput[],
-    financials: financials as unknown as FinancialAssumptionsInput,
-    firm,
-  };
+  return { customer, preferences, inferences, interactions, sourceRecords };
 }
 
-/* -------------------------------------------------------------------------- */
-/* Full bundle write (atomic replace of child collections)                    */
-/* -------------------------------------------------------------------------- */
-
-export interface ProjectBundleWriteInput {
-  project: Omit<ProjectInput, "id"> & { id?: string };
-  unitTypes: (Omit<UnitTypeInput, "id" | "projectId"> & { id?: string })[];
-  paymentMilestones: (Omit<PaymentMilestoneInput, "id" | "projectId"> & { id?: string })[];
-  comparableProjects: (Omit<ComparableProjectInput, "id" | "projectId"> & { id?: string })[];
-  financials: Omit<FinancialAssumptionsInput, "id" | "projectId">;
-}
-
-export async function saveProjectBundle(id: string, input: ProjectBundleWriteInput) {
-  await assertProjectNameAvailable(input.project.name, id);
-  const now = new Date().toISOString();
-
-  await db.transaction(async (tx) => {
-    await tx
-      .update(projects)
-      .set({
-        name: input.project.name,
-        developer: input.project.developer,
-        area: input.project.area,
-        subLocation: input.project.subLocation,
-        description: input.project.description,
-        status: input.project.status,
-        reraNumber: input.project.reraNumber,
-        escrowBank: input.project.escrowBank,
-        handoverDate: input.project.handoverDate,
-        launchDate: input.project.launchDate,
-        totalUnits: input.project.totalUnits,
-        amenities: JSON.stringify(input.project.amenities ?? []),
-        heroImageDataUrl: input.project.heroImageDataUrl,
-        currency: input.project.currency,
-        goldenVisaEligible: input.project.goldenVisaEligible,
-        updatedAt: now,
-      })
-      .where(eq(projects.id, id));
-
-    await tx.delete(unitTypes).where(eq(unitTypes.projectId, id));
-    if (input.unitTypes.length) {
-      await tx.insert(unitTypes).values(
-        input.unitTypes.map((u, idx) => ({ ...u, id: randomUUID(), projectId: id, sortOrder: idx }))
-      );
-    }
-
-    await tx.delete(paymentMilestones).where(eq(paymentMilestones.projectId, id));
-    if (input.paymentMilestones.length) {
-      await tx.insert(paymentMilestones).values(
-        input.paymentMilestones.map((m, idx) => ({ ...m, id: randomUUID(), projectId: id, sortOrder: idx }))
-      );
-    }
-
-    await tx.delete(comparableProjects).where(eq(comparableProjects.projectId, id));
-    if (input.comparableProjects.length) {
-      await tx.insert(comparableProjects).values(
-        input.comparableProjects.map((c, idx) => ({
-          ...c,
-          id: randomUUID(),
-          projectId: id,
-          priceHistory: JSON.stringify(c.priceHistory ?? []),
-          sortOrder: idx,
-        }))
-      );
-    }
-
-    const existingFinancials = await tx
-      .select()
-      .from(financialAssumptions)
-      .where(eq(financialAssumptions.projectId, id))
-      .limit(1);
-
-    if (existingFinancials[0]) {
-      await tx.update(financialAssumptions).set(input.financials).where(eq(financialAssumptions.projectId, id));
-    } else {
-      await tx.insert(financialAssumptions).values({ ...input.financials, id: randomUUID(), projectId: id });
-    }
+export async function listCustomers(
+  orgId: string,
+  opts: { search?: string; limit?: number; offset?: number } = {}
+) {
+  const limit = opts.limit ?? 50;
+  const offset = opts.offset ?? 0;
+  const whereClauses = [eq(schema.customers.orgId, orgId)];
+  const rows = await db.query.customers.findMany({
+    where: and(...whereClauses),
+    orderBy: desc(schema.customers.latestSeenAt),
+    limit,
+    offset,
   });
+  if (!opts.search) return rows;
+  const q = opts.search.toLowerCase();
+  return rows.filter(
+    (r) =>
+      r.name.toLowerCase().includes(q) ||
+      r.phone.toLowerCase().includes(q) ||
+      r.email.toLowerCase().includes(q) ||
+      r.normalizedPhone.includes(q)
+  );
+}
 
-  const bundle = (await getProjectBundle(id))!;
+export async function countCustomers(orgId: string) {
+  const [row] = await db
+    .select({ count: rawSql<number>`count(*)::int` })
+    .from(schema.customers)
+    .where(eq(schema.customers.orgId, orgId));
+  return row?.count ?? 0;
+}
 
-  // Grow the shared project directory from this save. Never let this block
-  // or fail the actual save — it's a nice-to-have, not core to the product.
-  upsertProjectDirectoryFromBundle(bundle).catch((err) => {
-    console.error("Failed to upsert project directory entry:", err);
+export async function getPendingDuplicateCandidates(orgId: string) {
+  return db.query.duplicateCandidates.findMany({
+    where: and(eq(schema.duplicateCandidates.orgId, orgId), eq(schema.duplicateCandidates.status, "pending")),
+    orderBy: desc(schema.duplicateCandidates.score),
   });
-
-  return bundle;
 }
 
-/* -------------------------------------------------------------------------- */
-/* Project directory (shared, growing library of project facts)               */
-/* -------------------------------------------------------------------------- */
+export async function resolveDuplicateCandidate(id: string, orgId: string, action: "merge" | "reject") {
+  const candidate = await db.query.duplicateCandidates.findFirst({
+    where: and(eq(schema.duplicateCandidates.id, id), eq(schema.duplicateCandidates.orgId, orgId)),
+  });
+  if (!candidate) return;
 
-function normalizeProjectName(name: string): string {
-  return name.trim().toLowerCase().replace(/\s+/g, " ");
-}
-
-/**
- * Thrown when a save/create would leave two projects with the same name.
- * Routes catch this and turn it into a 409 with a user-facing message.
- */
-export class DuplicateProjectNameError extends Error {}
-
-const UNTITLED_PROJECT_NORMALIZED = normalizeProjectName("Untitled Project");
-
-/**
- * Enforces one global rule: no two projects share a name (case/whitespace
- * insensitive). There's no agent/user concept in the schema yet (see the
- * "no auth/multi-tenant yet" note on firmSettings above), so this is scoped
- * across every project in the system for now — revisit per-agent scoping
- * once accounts exist.
- *
- * Deliberately skips blank names and the "Untitled Project" placeholder, so
- * agents can still have multiple fresh, not-yet-named drafts in flight —
- * the constraint only kicks in once a project actually has a real name.
- */
-async function assertProjectNameAvailable(name: string, excludeProjectId: string) {
-  const trimmed = (name ?? "").trim();
-  if (!trimmed) return;
-  const normalized = normalizeProjectName(trimmed);
-  if (normalized === UNTITLED_PROJECT_NORMALIZED) return;
-
-  const rows = await db.select({ id: projects.id, name: projects.name }).from(projects);
-  const clash = rows.find((r) => r.id !== excludeProjectId && normalizeProjectName(r.name) === normalized);
-  if (clash) {
-    throw new DuplicateProjectNameError(
-      `You already have a project named "${trimmed}". Use the magic wand on the name field to reuse it, or choose a different name.`
-    );
+  if (action === "merge") {
+    await mergeCustomers(candidate.customerAId, candidate.customerBId, orgId);
   }
-}
-
-async function upsertProjectDirectoryFromBundle(bundle: ProjectBundle) {
-  const name = bundle.project.name?.trim();
-  if (!name) return; // skip untitled/blank projects — nothing useful to store
-  const nameNormalized = normalizeProjectName(name);
-  const now = new Date().toISOString();
-
-  const unitTypesJson = JSON.stringify(
-    bundle.unitTypes.map((u) => ({
-      typeLabel: u.typeLabel,
-      sizeSqftMin: u.sizeSqftMin,
-      sizeSqftMax: u.sizeSqftMax,
-      priceFrom: u.priceFrom,
-      priceTo: u.priceTo,
-      representativePrice: u.representativePrice,
-      serviceChargePerSqft: u.serviceChargePerSqft,
-    }))
-  );
-  const comparableProjectsJson = JSON.stringify(
-    bundle.comparableProjects.map((c) => ({
-      name: c.name,
-      area: c.area,
-      distanceKm: c.distanceKm,
-      priceHistory: c.priceHistory,
-      notes: c.notes,
-    }))
-  );
-
-  const values = {
-    name,
-    developer: bundle.project.developer,
-    area: bundle.project.area,
-    subLocation: bundle.project.subLocation,
-    description: bundle.project.description,
-    status: bundle.project.status,
-    reraNumber: bundle.project.reraNumber,
-    escrowBank: bundle.project.escrowBank,
-    handoverDate: bundle.project.handoverDate,
-    launchDate: bundle.project.launchDate,
-    totalUnits: bundle.project.totalUnits,
-    amenities: JSON.stringify(bundle.project.amenities ?? []),
-    currency: bundle.project.currency,
-    goldenVisaEligible: bundle.project.goldenVisaEligible,
-    unitTypesJson,
-    comparableProjectsJson,
-    updatedAt: now,
-  };
-
   await db
-    .insert(projectDirectory)
-    .values({ id: randomUUID(), nameNormalized, createdAt: now, heroImageDataUrl: bundle.project.heroImageDataUrl, ...values })
-    .onConflictDoUpdate({ target: projectDirectory.nameNormalized, set: values });
+    .update(schema.duplicateCandidates)
+    .set({ status: action === "merge" ? "merged" : "rejected", resolvedAt: new Date() })
+    .where(eq(schema.duplicateCandidates.id, id));
+}
 
-  // Hero image handled separately from the rest of `values`: only ever set it
-  // when this save actually has one, so a later save that doesn't touch the
-  // image (or was made before an image existed) never blanks out a good one
-  // a previous agent already contributed.
-  if (bundle.project.heroImageDataUrl) {
-    await sql`UPDATE project_directory SET hero_image_data_url = ${bundle.project.heroImageDataUrl} WHERE name_normalized = ${nameNormalized}`;
+/** Merges customer B into customer A, preserving B's full history under A. */
+export async function mergeCustomers(keepId: string, mergeId: string, orgId: string) {
+  if (keepId === mergeId) return;
+  await db
+    .update(schema.customerIdentities)
+    .set({ customerId: keepId, isPrimary: false })
+    .where(eq(schema.customerIdentities.customerId, mergeId));
+  await db
+    .update(schema.customerSourceRecords)
+    .set({ customerId: keepId })
+    .where(eq(schema.customerSourceRecords.customerId, mergeId));
+  await db
+    .update(schema.customerInteractions)
+    .set({ customerId: keepId })
+    .where(eq(schema.customerInteractions.customerId, mergeId));
+
+  const [prefA, prefB, mergeCustomer] = await Promise.all([
+    db.query.customerPreferences.findFirst({ where: eq(schema.customerPreferences.customerId, keepId) }),
+    db.query.customerPreferences.findFirst({ where: eq(schema.customerPreferences.customerId, mergeId) }),
+    db.query.customers.findFirst({ where: eq(schema.customers.id, mergeId) }),
+  ]);
+  if (prefB) {
+    if (prefA) {
+      await db
+        .update(schema.customerPreferences)
+        .set({
+          budgetMin: prefA.budgetMin ?? prefB.budgetMin,
+          budgetMax: prefA.budgetMax ?? prefB.budgetMax,
+          preferredLocations: mergeArrays(prefA.preferredLocations, prefB.preferredLocations),
+          interestedProjects: mergeArrays(prefA.interestedProjects, prefB.interestedProjects),
+          preferredDevelopers: mergeArrays(prefA.preferredDevelopers, prefB.preferredDevelopers),
+          bedrooms: mergeArrays(prefA.bedrooms, prefB.bedrooms),
+          propertyTypes: mergeArrays(prefA.propertyTypes, prefB.propertyTypes),
+        })
+        .where(eq(schema.customerPreferences.customerId, keepId));
+    } else {
+      await db.insert(schema.customerPreferences).values({ ...prefB, id: newId("pref"), customerId: keepId });
+    }
+    await db.delete(schema.customerPreferences).where(eq(schema.customerPreferences.customerId, mergeId));
   }
+
+  if (mergeCustomer) {
+    await db
+      .update(schema.customers)
+      .set({
+        latestSeenAt: mergeCustomer.latestSeenAt,
+      })
+      .where(eq(schema.customers.id, keepId));
+  }
+
+  await db.delete(schema.customerInferences).where(eq(schema.customerInferences.customerId, mergeId));
+  await db.delete(schema.customers).where(and(eq(schema.customers.id, mergeId), eq(schema.customers.orgId, orgId)));
+  await logAudit({ orgId, action: "customer.merged", entityType: "customer", entityId: keepId, metadata: { mergedId: mergeId } });
 }
 
-/**
- * Looks up the project directory for a name an agent just typed. Tries an
- * exact normalized match first, then falls back to a partial match in either
- * direction (typed name is a substring of a stored name, or vice versa) so
- * "Marina Horizon" still finds "Marina Horizon Residences". Increments the
- * matched entry's usage count. Returns null if nothing matches.
- */
-interface ProjectDirectoryRow {
-  id: string;
-  name: string;
-  developer: string;
-  area: string;
-  sub_location: string;
-  description: string;
-  status: ProjectInput["status"];
-  rera_number: string;
-  escrow_bank: string;
-  handover_date: string | null;
-  launch_date: string | null;
-  total_units: number | null;
-  amenities: string;
-  currency: string;
-  golden_visa_eligible: boolean;
-  hero_image_data_url: string | null;
-  unit_types_json: string;
-  comparable_projects_json: string;
-  updated_at: string;
+// ---------------------------------------------------------------------------
+// Projects
+// ---------------------------------------------------------------------------
+
+export async function listProjects(orgId: string) {
+  return db.query.projects.findMany({
+    where: eq(schema.projects.orgId, orgId),
+    orderBy: desc(schema.projects.createdAt),
+  });
 }
 
-function mapDirectoryRow(row: ProjectDirectoryRow): ProjectDirectoryMatch {
+export async function getProjectDetail(projectId: string, orgId: string) {
+  const project = await db.query.projects.findFirst({
+    where: and(eq(schema.projects.id, projectId), eq(schema.projects.orgId, orgId)),
+  });
+  if (!project) return null;
+  const [unitTypes, features, profile] = await Promise.all([
+    db.query.projectUnitTypes.findMany({ where: eq(schema.projectUnitTypes.projectId, projectId) }),
+    db.query.projectFeatures.findMany({ where: eq(schema.projectFeatures.projectId, projectId) }),
+    db.query.projectProfiles.findFirst({ where: eq(schema.projectProfiles.projectId, projectId) }),
+  ]);
+  return { project, unitTypes, features, profile };
+}
+
+export async function countCustomersForOrg(orgId: string) {
+  return countCustomers(orgId);
+}
+
+// ---------------------------------------------------------------------------
+// Dashboard aggregate stats (spec section 1)
+// ---------------------------------------------------------------------------
+
+export async function getDashboardStats(orgId: string) {
+  const [totalLeadsRow] = await db
+    .select({ count: rawSql<number>`count(*)::int` })
+    .from(schema.importedRows)
+    .innerJoin(schema.importJobs, eq(schema.importJobs.id, schema.importedRows.importJobId))
+    .where(eq(schema.importJobs.orgId, orgId));
+
+  const [uniqueCustomersRow] = await db
+    .select({ count: rawSql<number>`count(*)::int` })
+    .from(schema.customers)
+    .where(eq(schema.customers.orgId, orgId));
+
+  const [duplicatesMergedRow] = await db
+    .select({ count: rawSql<number>`count(*)::int` })
+    .from(schema.duplicateCandidates)
+    .where(and(eq(schema.duplicateCandidates.orgId, orgId), eq(schema.duplicateCandidates.status, "merged")));
+
+  const [usableIntentRow] = await db
+    .select({ count: rawSql<number>`count(*)::int` })
+    .from(schema.customerPreferences)
+    .innerJoin(schema.customers, eq(schema.customers.id, schema.customerPreferences.customerId))
+    .where(
+      and(
+        eq(schema.customers.orgId, orgId),
+        rawSql`(${schema.customerPreferences.budgetMin} is not null or ${schema.customerPreferences.budgetMax} is not null or jsonb_array_length(${schema.customerPreferences.preferredLocations}) > 0)`
+      )
+    );
+
+  const [projectsRow] = await db
+    .select({ count: rawSql<number>`count(*)::int` })
+    .from(schema.projects)
+    .where(eq(schema.projects.orgId, orgId));
+
+  const [highMatchRow] = await db
+    .select({ count: rawSql<number>`count(*)::int` })
+    .from(schema.projectMatches)
+    .innerJoin(schema.projects, eq(schema.projects.id, schema.projectMatches.projectId))
+    .where(and(eq(schema.projects.orgId, orgId), inArray(schema.projectMatches.bucket, ["hot", "warm"])));
+
+  const recentProjects = await db.query.projects.findMany({
+    where: eq(schema.projects.orgId, orgId),
+    orderBy: desc(schema.projects.updatedAt),
+    limit: 5,
+  });
+
   return {
-    name: row.name,
-    developer: row.developer,
-    area: row.area,
-    subLocation: row.sub_location,
-    description: row.description,
-    status: row.status,
-    reraNumber: row.rera_number,
-    escrowBank: row.escrow_bank,
-    handoverDate: row.handover_date,
-    launchDate: row.launch_date,
-    totalUnits: row.total_units,
-    amenities: safeParseArray(row.amenities),
-    currency: row.currency,
-    goldenVisaEligible: row.golden_visa_eligible,
-    heroImageDataUrl: row.hero_image_data_url,
-    unitTypes: safeParseArray(row.unit_types_json),
-    comparableProjects: safeParseArray(row.comparable_projects_json),
-    updatedAt: row.updated_at,
+    totalLeadsImported: totalLeadsRow?.count ?? 0,
+    uniqueCustomers: uniqueCustomersRow?.count ?? 0,
+    duplicatesMerged: duplicatesMergedRow?.count ?? 0,
+    usableBuyerIntent: usableIntentRow?.count ?? 0,
+    projectsAnalyzed: projectsRow?.count ?? 0,
+    highMatchOpportunities: highMatchRow?.count ?? 0,
+    recentProjects,
   };
-}
-
-export async function lookupProjectDirectory(name: string): Promise<ProjectDirectoryMatch | null> {
-  const normalized = normalizeProjectName(name);
-  if (!normalized) return null;
-
-  const rows = await sql<ProjectDirectoryRow[]>`
-    SELECT * FROM project_directory
-    WHERE name_normalized = ${normalized}
-       OR name_normalized ILIKE ${"%" + normalized + "%"}
-       OR ${normalized} ILIKE ('%' || name_normalized || '%')
-    ORDER BY
-      (name_normalized = ${normalized}) DESC,
-      times_used DESC,
-      updated_at DESC
-    LIMIT 1
-  `;
-  const row = rows[0];
-  if (!row) return null;
-
-  await sql`UPDATE project_directory SET times_used = times_used + 1 WHERE id = ${row.id}`;
-
-  return mapDirectoryRow(row);
-}
-
-/**
- * Like lookupProjectDirectory, but returns up to `limit` candidate matches
- * instead of silently picking the single "best" one — used to populate the
- * magic-wand dropdown so the agent can see all similarly-named projects and
- * pick the one they actually mean. Doesn't bump times_used itself; that
- * happens when the agent commits to a pick (via the exact-match lookup
- * above), so browsing the list doesn't skew the popularity ranking.
- */
-export async function lookupProjectDirectorySuggestions(
-  name: string,
-  limit = 6
-): Promise<ProjectDirectoryMatch[]> {
-  const normalized = normalizeProjectName(name);
-  if (!normalized) return [];
-
-  const rows = await sql<ProjectDirectoryRow[]>`
-    SELECT * FROM project_directory
-    WHERE name_normalized ILIKE ${"%" + normalized + "%"}
-       OR ${normalized} ILIKE ('%' || name_normalized || '%')
-    ORDER BY
-      (name_normalized = ${normalized}) DESC,
-      times_used DESC,
-      updated_at DESC
-    LIMIT ${limit}
-  `;
-  return rows.map(mapDirectoryRow);
-}
-
-/* -------------------------------------------------------------------------- */
-/* Generated reports                                                          */
-/* -------------------------------------------------------------------------- */
-
-export async function insertGeneratedReport(input: {
-  projectId: string;
-  clientName: string;
-  clientPhone: string;
-  clientEmail: string;
-  focusUnitTypeId: string | null;
-  snapshotJson: string;
-  pdfFileName: string;
-}) {
-  const id = randomUUID();
-  await db.insert(generatedReports).values({ id, ...input });
-  return id;
-}
-
-export async function listReportsForProject(projectId: string) {
-  return db
-    .select()
-    .from(generatedReports)
-    .where(eq(generatedReports.projectId, projectId))
-    .orderBy(desc(generatedReports.createdAt));
-}
-
-export async function getReportById(id: string) {
-  const rows = await db.select().from(generatedReports).where(eq(generatedReports.id, id)).limit(1);
-  return rows[0] ?? null;
-}
-
-function safeParseArray(value: string | null | undefined): any[] {
-  if (!value) return [];
-  try {
-    const parsed = JSON.parse(value);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
 }

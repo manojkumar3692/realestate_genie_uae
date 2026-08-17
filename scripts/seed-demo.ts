@@ -1,149 +1,276 @@
 /**
- * Seeds a realistic demo project (Marina Horizon Residences) with sample firm
- * branding, unit types, payment plan, comparables and financial assumptions,
- * then generates a sample PDF — so the app has something to look at on first run.
- *
- * Run with: npm run db:seed
- * Safe to re-run; each run adds a new demo project rather than overwriting.
- *
- * (Env vars come from `.env.local` via the `tsx --env-file` flag in the
- * `db:seed` npm script — a plain `import "dotenv/config"` here wouldn't work,
- * since ESM hoists all imports above this file's own top-level code, so
- * everything below would already have been evaluated against an empty env.)
+ * Seeds a realistic demo agency so the product is understandable immediately
+ * after setup — a messy synthetic CRM export run through the real import
+ * pipeline (not hand-inserted rows), plus a few demo projects with matching
+ * already run. Safe to re-run: skips generation if the demo org already has
+ * customers.
  */
-import { createDraftProject, saveProjectBundle, updateFirmSettings, insertGeneratedReport } from "../src/db/repo";
-import { buildComputedReportData, renderReportHtml } from "../src/lib/pdf-template";
-import { htmlToPdfBuffer } from "../src/lib/pdf-generate";
-import { uploadPdf } from "../src/lib/pdf-storage";
+import { eq } from "drizzle-orm";
+import { db } from "../src/db/client";
+import { organizations, users, customers } from "../src/db/schema";
+import { newId } from "../src/lib/id";
+import { hashPassword } from "../src/lib/auth/password";
+import { detectColumns } from "../src/lib/import/detectColumns";
+import {
+  createImportJob,
+  storeRawImportRows,
+  saveColumnMappings,
+  runImportPipeline,
+} from "../src/db/repo";
+import { runAiEnrichmentForImport, runMatchingForProject } from "../src/db/repoMatching";
+import { createProject } from "../src/db/repoProjects";
 
-async function main() {
-  await updateFirmSettings({
-    firmName: "Palm Coast Realty",
-    agentName: "Sara Al Mansoori",
-    agentTitle: "Senior Investment Consultant",
-    agentPhone: "+971 50 123 4567",
-    agentWhatsapp: "+971501234567",
-    agentEmail: "sara@palmcoastrealty.ae",
-    reraBrokerNumber: "12345",
-    primaryColor: "#0B3B37",
-    accentColor: "#C9A24B",
-  });
+const DEMO_EMAIL = "demo@realestategenie.local";
+const DEMO_PASSWORD = "demo12345";
+const ROW_COUNT = 600;
 
-  const id = await createDraftProject("Marina Horizon Residences");
+const FIRST_NAMES = [
+  "Ahmed", "Rahul", "Sarah", "Mohammed", "Priya", "John", "Fatima", "Imran", "Elena", "David",
+  "Aisha", "Rajesh", "Layla", "Omar", "Anjali", "Hassan", "Natasha", "Yusuf", "Meera", "Khalid",
+  "Sofia", "Arjun", "Noor", "Michael", "Divya", "Bilal", "Olga", "Zainab", "Vikram", "Grace",
+];
+const LAST_NAMES = [
+  "Khan", "Sharma", "Malik", "Al Mansoori", "Patel", "Smith", "Hussain", "Ivanova", "Ali", "Nair",
+  "Ahmed", "Gupta", "Rashid", "Petrov", "Fernandes", "Siddiqui", "Kapoor", "Johnson", "Qureshi", "Rao",
+];
+const NATIONALITIES = ["Indian", "British", "Emirati", "Pakistani", "Russian", "Egyptian", "Filipino", "French", "Nigerian", "Chinese"];
+const LOCATIONS = ["JVC", "Dubai South", "Arjan", "Business Bay", "Dubai Marina", "Dubai Hills", "Sobha Hartland", "JLT", "Al Furjan", "Dubailand", "Downtown Dubai"];
+const SOURCES = ["Facebook", "FB", "Meta Lead Ads", "Instagram", "Google Ads", "Bayut", "Property Finder", "Referral", "Website", ""];
+const CAMPAIGNS = ["JVC Investors March 2025", "Dubai South Launch Q1", "Investor Retargeting", "Ready Homes Push", "", "", ""];
+const BEDROOMS = ["Studio", "1BR", "1BR", "2BR", "2BR", "3BR"];
+const PROPERTY_TYPES = ["Apartment", "Apartment", "Apartment", "Townhouse", "Villa"];
+const PURPOSES = ["Investment", "Investment", "End use", "Investment", ""];
+const TIMELINES = ["1-3 months", "3-6 months", "6-12 months", "Not sure yet", ""];
+const PAYMENT_PREFS = ["Wants low upfront payment", "Flexible payment plan preferred", "Cash buyer", ""];
+const STATUSES = ["New", "Contacted", "Lost", "Lost", "New", "Contacted"];
+const LOST_REASONS = ["Too expensive", "Payment plan not good", "Wanted ready property", "Went cold", "", "", ""];
 
-  const bundle = await saveProjectBundle(id, {
-    project: {
-      name: "Marina Horizon Residences",
-      developer: "Emaar Coastal Developments",
-      area: "Dubai Maritime City",
-      subLocation: "Waterfront District",
-      description:
-        "A landmark waterfront tower offering studio to 2-bedroom residences with direct marina access, resort-style amenities, and panoramic sea views — minutes from Downtown Dubai.",
-      status: "off_plan",
-      reraNumber: "DXB-RERA-98213",
-      escrowBank: "Emirates NBD",
-      handoverDate: "2028-06-01",
-      launchDate: "2025-01-01",
-      totalUnits: 420,
-      amenities: ["Infinity Pool", "Private Beach Access", "Marina Promenade", "Kids Play Area", "Gym & Spa", "Co-working Lounge", "24/7 Concierge", "Retail Boulevard"],
-      heroImageDataUrl: null,
-      currency: "AED",
-      goldenVisaEligible: true,
-    },
-    unitTypes: [
-      { typeLabel: "Studio", sizeSqftMin: 420, sizeSqftMax: 460, priceFrom: 780000, priceTo: 850000, representativePrice: 810000, serviceChargePerSqft: 14 },
-      { typeLabel: "1 Bedroom", sizeSqftMin: 720, sizeSqftMax: 780, priceFrom: 1200000, priceTo: 1350000, representativePrice: 1270000, serviceChargePerSqft: 15 },
-      { typeLabel: "2 Bedroom", sizeSqftMin: 1100, sizeSqftMax: 1220, priceFrom: 1850000, priceTo: 2100000, representativePrice: 1950000, serviceChargePerSqft: 16 },
-    ] as any,
-    paymentMilestones: [
-      { label: "On Booking", percent: 10, monthsFromLaunch: 0, triggerType: "booking" },
-      { label: "1st Installment", percent: 10, monthsFromLaunch: 6, triggerType: "construction" },
-      { label: "2nd Installment", percent: 10, monthsFromLaunch: 12, triggerType: "construction" },
-      { label: "3rd Installment", percent: 10, monthsFromLaunch: 18, triggerType: "construction" },
-      { label: "4th Installment", percent: 10, monthsFromLaunch: 24, triggerType: "construction" },
-      { label: "On Handover", percent: 30, monthsFromLaunch: 30, triggerType: "handover" },
-      { label: "Post-Handover (Yr 1)", percent: 20, monthsFromLaunch: 42, triggerType: "post_handover" },
-    ] as any,
-    comparableProjects: [
-      {
-        name: "Marina Gate Residences",
-        area: "Dubai Marina",
-        distanceKm: 2.1,
-        priceHistory: [
-          { year: 2021, pricePerSqft: 1450 },
-          { year: 2022, pricePerSqft: 1580 },
-          { year: 2023, pricePerSqft: 1720 },
-          { year: 2024, pricePerSqft: 1890 },
-        ],
-        notes: "Comparable waterfront community, fully handed over.",
-      },
-      {
-        name: "Bluewaters Bay",
-        area: "Bluewaters Island",
-        distanceKm: 4.5,
-        priceHistory: [
-          { year: 2021, pricePerSqft: 1600 },
-          { year: 2022, pricePerSqft: 1750 },
-          { year: 2023, pricePerSqft: 1980 },
-          { year: 2024, pricePerSqft: 2150 },
-        ],
-        notes: "",
-      },
-    ] as any,
-    financials: {
-      projectionYears: 5,
-      annualAppreciationPercent: 7.5,
-      rentalYieldPercent: 7,
-      rentGrowthPercent: 4,
-      vacancyPercent: 5,
-      loanEnabled: true,
-      ltvPercent: 50,
-      interestRatePercent: 4.25,
-      tenureYears: 20,
-      bankName: "Emirates NBD",
-      dldFeePercent: 4,
-      otherAcquisitionCostPercent: 2,
-      exitYear: 5,
-      exitSellingCostPercent: 4,
-    },
-  });
-
-  console.log("Project created:", id);
-  console.log("Unit types:", bundle.unitTypes.map((u) => u.typeLabel));
-
-  const clientInfo = {
-    clientName: "Mr. Rajesh Kumar",
-    clientPhone: "+91 98765 43210",
-    clientEmail: "rajesh.kumar@example.com",
-    focusUnitTypeId: bundle.unitTypes.find((u) => u.typeLabel === "1 Bedroom")!.id,
-  };
-
-  const computed = buildComputedReportData(bundle, clientInfo);
-  const html = renderReportHtml(bundle, clientInfo, computed);
-
-  console.log("HTML length:", html.length);
-
-  const pdfBuffer = await htmlToPdfBuffer(html);
-  const fileName = `marina-horizon-demo-${Date.now()}.pdf`;
-  const objectPath = `${id}/${fileName}`;
-  await uploadPdf(objectPath, pdfBuffer);
-
-  await insertGeneratedReport({
-    projectId: id,
-    clientName: clientInfo.clientName,
-    clientPhone: clientInfo.clientPhone,
-    clientEmail: clientInfo.clientEmail,
-    focusUnitTypeId: clientInfo.focusUnitTypeId,
-    snapshotJson: JSON.stringify({ bundle, clientInfo }),
-    pdfFileName: objectPath,
-  });
-
-  console.log(`\nDemo project ready: "${bundle.project.name}"`);
-  console.log(`Sample PDF uploaded to Supabase Storage at: ${objectPath} (${(pdfBuffer.length / 1024).toFixed(0)} KB)`);
-  console.log(`\nRun "npm run dev" and open http://localhost:3000 to see it in the dashboard.`);
+function pick<T>(arr: T[]): T {
+  return arr[Math.floor(Math.random() * arr.length)];
+}
+function randomInt(min: number, max: number): number {
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+function randomPhone(): string {
+  const prefixes = ["50", "52", "54", "55", "56", "58"];
+  const num = `${pick(prefixes)}${randomInt(1000000, 9999999)}`;
+  const style = randomInt(0, 3);
+  if (style === 0) return `0${num}`;
+  if (style === 1) return `+971${num}`;
+  if (style === 2) return `971${num}`;
+  return `0${num.slice(0, 2)} ${num.slice(2, 5)} ${num.slice(5)}`;
+}
+function randomBudgetText(): string {
+  const styles = [
+    () => `${randomInt(6, 20) * 100}K`,
+    () => `${(randomInt(8, 30) / 10).toFixed(1)}M`,
+    () => `AED ${(randomInt(700, 2500) * 1000).toLocaleString()}`,
+    () => `${randomInt(6, 15) * 100}K - ${randomInt(16, 25) * 100}K`,
+    () => `under ${randomInt(8, 15) * 100}k`,
+    () => `can stretch to ${(randomInt(10, 18) / 10).toFixed(1)}m if good payment plan`,
+  ];
+  return pick(styles)();
+}
+function randomDate(monthsAgoMax: number): string {
+  const d = new Date();
+  d.setDate(d.getDate() - randomInt(0, monthsAgoMax * 30));
+  return d.toISOString().slice(0, 10);
+}
+function buildNote(nationality: string, location: string, budget: string, bedroom: string, objection: string): string {
+  const templates = [
+    `${nationality} investor. Looking ${location} side. ${budget} ideally. Wants ${bedroom}. ${objection ? `Previously said: "${objection}".` : ""}`,
+    `Client is interested in ${bedroom} units around ${location}. Budget roughly ${budget}. Investment purpose, wants good rental yield.`,
+    `Spoke on WhatsApp — ${nationality} buyer, mentioned budget ${budget}, prefers ${location} or similar community. ${objection ? `Objection: ${objection}.` : "No objections raised yet."}`,
+    `${nationality} family looking to buy ${bedroom} for own use near ${location}. Not in a rush, timeline flexible.`,
+    "",
+  ];
+  return pick(templates);
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+async function main() {
+  const existingUser = await db.query.users.findFirst({ where: eq(users.normalizedEmail, DEMO_EMAIL) });
+  let orgId: string;
+  let userId: string;
+
+  if (existingUser) {
+    orgId = existingUser.orgId;
+    userId = existingUser.id;
+    console.log(`Demo account already exists (${DEMO_EMAIL}).`);
+  } else {
+    orgId = newId("org");
+    await db.insert(organizations).values({ id: orgId, name: "Skyline Properties (Demo)" });
+    userId = newId("user");
+    await db.insert(users).values({
+      id: userId,
+      orgId,
+      email: DEMO_EMAIL,
+      normalizedEmail: DEMO_EMAIL,
+      passwordHash: await hashPassword(DEMO_PASSWORD),
+      name: "Demo Agent",
+      role: "admin",
+    });
+    console.log(`Created demo account: ${DEMO_EMAIL} / ${DEMO_PASSWORD}`);
+  }
+
+  const existingCustomerCount = await db.$count(customers, eq(customers.orgId, orgId));
+  if (existingCustomerCount > 0) {
+    console.log(`Demo org already has ${existingCustomerCount} customers — skipping data generation (safe re-run).`);
+    console.log(`Log in at /login with ${DEMO_EMAIL} / ${DEMO_PASSWORD}`);
+    process.exit(0);
+  }
+
+  console.log(`Generating ${ROW_COUNT} synthetic messy CRM rows…`);
+  const headers = [
+    "Cust_Name", "Mob1", "Email", "Nationality", "Lead_Src", "Campaign", "Proj_Int",
+    "Preferred_Location", "Bgt", "Bedrooms", "Property_Type", "Purpose", "Timeline",
+    "Payment_Pref", "Status", "Lost_Reason", "Sales_Rem", "Created_On", "Last_Contact",
+  ];
+  const rows: Record<string, string>[] = [];
+  const usedPhones: string[] = [];
+
+  for (let i = 0; i < ROW_COUNT; i++) {
+    const first = pick(FIRST_NAMES);
+    const last = pick(LAST_NAMES);
+    const name = `${first} ${last}`;
+    const nationality = pick(NATIONALITIES);
+    const location = pick(LOCATIONS);
+    const budget = randomBudgetText();
+    const bedroom = pick(BEDROOMS);
+    const objection = pick(LOST_REASONS);
+    const leadDate = randomDate(30);
+
+    // ~6% of rows are intentional duplicates of an earlier phone (same lead re-entered by another agent).
+    const isDuplicate = i > 20 && Math.random() < 0.06 && usedPhones.length > 0;
+    const phone = isDuplicate ? pick(usedPhones) : randomPhone();
+    if (!isDuplicate) usedPhones.push(phone);
+
+    rows.push({
+      Cust_Name: isDuplicate ? name : name, // duplicates may have a slightly different name spelling in real life; kept simple here
+      Mob1: phone,
+      Email: Math.random() < 0.6 ? `${first.toLowerCase()}.${last.toLowerCase().replace(/\s+/g, "")}${i}@example.com` : "",
+      Nationality: nationality,
+      Lead_Src: pick(SOURCES),
+      Campaign: pick(CAMPAIGNS),
+      Proj_Int: pick(["Sobha Hartland", "Dubai Hills Views", "Marina Horizon", "", ""]),
+      Preferred_Location: location,
+      Bgt: budget,
+      Bedrooms: bedroom,
+      Property_Type: pick(PROPERTY_TYPES),
+      Purpose: pick(PURPOSES),
+      Timeline: pick(TIMELINES),
+      Payment_Pref: pick(PAYMENT_PREFS),
+      Status: pick(STATUSES),
+      Lost_Reason: objection,
+      Sales_Rem: buildNote(nationality, location, budget, bedroom, objection),
+      Created_On: leadDate,
+      Last_Contact: Math.random() < 0.7 ? randomDate(18) : "",
+    });
+  }
+
+  const importJobId = await createImportJob({
+    orgId,
+    createdBy: userId,
+    fileName: "demo-crm-export.csv",
+    fileType: "csv",
+    sheetName: "Sheet1",
+    headerRowIndex: 0,
+    rowCount: rows.length,
+  });
+  await storeRawImportRows(importJobId, rows);
+
+  const columnSamples: Record<string, string[]> = {};
+  for (const h of headers) columnSamples[h] = rows.slice(0, 10).map((r) => r[h]).filter(Boolean);
+  const detections = detectColumns(headers, columnSamples);
+  await saveColumnMappings(importJobId, detections);
+
+  console.log("Running the real import pipeline (normalize, dedupe, build timelines)…");
+  const stats = await runImportPipeline(orgId, importJobId, detections);
+  console.log(stats);
+
+  console.log("Running AI enrichment (no-op if OPENAI_API_KEY isn't set — deterministic layer still works)…");
+  await runAiEnrichmentForImport(importJobId, orgId);
+
+  console.log("Creating demo projects…");
+  const azuraId = await createProject({
+    orgId,
+    createdBy: userId,
+    name: "Azura Residences",
+    developer: "Meraas",
+    city: "Dubai",
+    community: "Dubai South",
+    location: "Dubai South",
+    nearbyAreas: ["Arjan"],
+    propertyTypes: ["Apartment"],
+    bedroomTypes: ["Studio", "1BR", "2BR"],
+    startingPrice: 750_000,
+    maxPrice: 1_450_000,
+    currency: "AED",
+    paymentPlanSummary: "20/50/30 — 20% down, 50% during construction, 30% on handover",
+    downPaymentPercent: 20,
+    constructionStatus: "off_plan",
+    expectedHandover: "Q4 2029",
+    expectedRentalYieldPercent: 7.2,
+    expectedAppreciationPercent: 6,
+    targetBuyerType: "investor",
+    freeholdStatus: true,
+    amenities: ["Infinity pool", "Co-working lounge", "Retail podium", "Near Al Maktoum Airport"],
+    sellingPoints: ["Low initial payment", "Near airport", "Affordable entry point"],
+    notes: "Demo seed project from the product spec's own example.",
+    rawPastedText: "",
+    unitTypes: [
+      { typeLabel: "Studio", bedrooms: 0, sizeSqftMin: 380, sizeSqftMax: 420, priceFrom: 750_000, priceTo: 820_000 },
+      { typeLabel: "1BR", bedrooms: 1, sizeSqftMin: 650, sizeSqftMax: 750, priceFrom: 995_000, priceTo: 1_150_000 },
+      { typeLabel: "2BR", bedrooms: 2, sizeSqftMin: 950, sizeSqftMax: 1100, priceFrom: 1_250_000, priceTo: 1_450_000 },
+    ],
+  });
+
+  const hillsId = await createProject({
+    orgId,
+    createdBy: userId,
+    name: "Dubai Hills Grove",
+    developer: "Emaar",
+    city: "Dubai",
+    community: "Dubai Hills Estate",
+    location: "Dubai Hills Estate",
+    nearbyAreas: ["Sobha Hartland"],
+    propertyTypes: ["Apartment"],
+    bedroomTypes: ["1BR", "2BR", "3BR"],
+    startingPrice: 1_150_000,
+    maxPrice: 2_600_000,
+    currency: "AED",
+    paymentPlanSummary: "10/70/20 post-handover flexible plan",
+    downPaymentPercent: 10,
+    constructionStatus: "off_plan",
+    expectedHandover: "Q2 2028",
+    expectedRentalYieldPercent: 6.1,
+    expectedAppreciationPercent: 8,
+    targetBuyerType: "both",
+    freeholdStatus: true,
+    amenities: ["Golf course views", "Community park", "International school nearby"],
+    sellingPoints: ["Premium community", "Flexible post-handover plan", "Strong appreciation track record"],
+    notes: "",
+    rawPastedText: "",
+    unitTypes: [
+      { typeLabel: "1BR", bedrooms: 1, sizeSqftMin: 700, sizeSqftMax: 780, priceFrom: 1_150_000, priceTo: 1_350_000 },
+      { typeLabel: "2BR", bedrooms: 2, sizeSqftMin: 1050, sizeSqftMax: 1200, priceFrom: 1_700_000, priceTo: 2_000_000 },
+      { typeLabel: "3BR", bedrooms: 3, sizeSqftMin: 1500, sizeSqftMax: 1700, priceFrom: 2_200_000, priceTo: 2_600_000 },
+    ],
+  });
+
+  console.log("Running the matching engine for both demo projects…");
+  const azuraSummary = await runMatchingForProject(azuraId, orgId, userId);
+  const hillsSummary = await runMatchingForProject(hillsId, orgId, userId);
+  console.log("Azura Residences:", azuraSummary);
+  console.log("Dubai Hills Grove:", hillsSummary);
+
+  console.log("\nDone. Log in with:");
+  console.log(`  Email:    ${DEMO_EMAIL}`);
+  console.log(`  Password: ${DEMO_PASSWORD}`);
+}
+
+main()
+  .then(() => process.exit(0))
+  .catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });

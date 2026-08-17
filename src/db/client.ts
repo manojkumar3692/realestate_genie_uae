@@ -8,8 +8,7 @@ if (!connectionString) {
   throw new Error(
     "DATABASE_URL is not set. Create a Supabase project, copy its connection string " +
       "(Project Settings -> Database -> Connection string -> Transaction pooler), and set it " +
-      "as DATABASE_URL in your .env.local file (for local dev) and in your Vercel project's " +
-      "Environment Variables (for production)."
+      "as DATABASE_URL in your .env.local file."
   );
 }
 
@@ -23,8 +22,6 @@ const client =
     // prepared statements, so this must stay off regardless of which connection
     // string (pooled or direct) is used.
     prepare: false,
-    // Keep the pool small — each serverless invocation gets its own process, so a
-    // large pool per-instance just wastes connections against Supabase's limit.
     max: 5,
   });
 
