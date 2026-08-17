@@ -18,6 +18,14 @@ import { relations, sql } from "drizzle-orm";
 export const organizations = pgTable("organizations", {
   id: text("id").primaryKey(),
   name: text("name").notNull(),
+  // Commercial account model (see src/lib/pricing/config.ts for what each plan includes).
+  // `type` is the durable org-shape field other logic branches on (e.g. future per-agent
+  // privacy rules only apply to "team"); `planKey` is the billing-facing plan string, kept
+  // separate in case pricing promos/overrides ever diverge from the org's shape. Both default
+  // to "individual" so this migration is purely additive — no backfill needed for existing orgs.
+  type: text("type", { enum: ["individual", "team"] }).notNull().default("individual"),
+  planKey: text("plan_key", { enum: ["individual", "team"] }).notNull().default("individual"),
+  region: text("region", { enum: ["uae", "india"] }).notNull().default("uae"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`now()`),
 });
 
