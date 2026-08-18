@@ -1,33 +1,39 @@
 @import "tailwindcss";
 
 :root {
-  --background: #FBFAF6;
-  --foreground: #1B211E;
+  /* App-wide theme — unified with the landing page's visual system. Warm off-white base,
+     charcoal ink for text/primary actions, ONE accent (deep indigo) reserved for AI matching /
+     intelligence signals (active states, "why this matched", hover-activation on primary
+     actions). This is the same palette as the --ai-* tokens further down; --brand-* is kept as
+     the name every existing component already uses, just repointed to the new values so the
+     whole product reskins from this one file. */
+  --background: #F6F3EC;
+  --foreground: #15130E;
 
-  --brand-primary: #0B3B37;
-  --brand-primary-light: #14504A;
-  --brand-primary-dark: #072722;
-  --brand-accent: #C9A24B;
-  --brand-accent-light: #E4CD8E;
-  --brand-accent-dark: #A9822F;
-  --brand-cream: #F6F2E8;
-  --brand-cream-deep: #EFE8D6;
-  --brand-border: #E7E1D2;
-  --brand-muted: #837D6E;
-  --brand-positive: #1E7A4C;
-  --brand-positive-tint: #E8F3EC;
+  --brand-primary: #15130E;
+  --brand-primary-light: #2E2B22;
+  --brand-primary-dark: #0B0A07;
+  --brand-accent: #3626D9;
+  --brand-accent-light: #7A70EA;
+  --brand-accent-dark: #241AA3;
+  --brand-cream: #F6F3EC;
+  --brand-cream-deep: #EDE8DB;
+  --brand-border: rgba(21, 19, 14, 0.11);
+  --brand-muted: rgba(21, 19, 14, 0.52);
+  --brand-positive: #15803D;
+  --brand-positive-tint: rgba(21, 128, 61, 0.08);
 
-  --hot: #C4432B;
-  --hot-tint: #FBEAE6;
-  --warm: #B8862E;
-  --warm-tint: #FAF1E1;
-  --possible: #2B6FB8;
-  --possible-tint: #E7F0FA;
+  --hot: #B7410E;
+  --hot-tint: rgba(183, 65, 14, 0.08);
+  --warm: #A6790C;
+  --warm-tint: rgba(166, 121, 12, 0.08);
+  --possible: #6B6656;
+  --possible-tint: rgba(21, 19, 14, 0.055);
 
-  --shadow-sm: 0 1px 2px rgba(15, 35, 32, 0.06), 0 1px 1px rgba(15, 35, 32, 0.04);
-  --shadow-md: 0 4px 16px rgba(15, 35, 32, 0.08), 0 2px 6px rgba(15, 35, 32, 0.05);
-  --shadow-lg: 0 12px 32px rgba(15, 35, 32, 0.12), 0 4px 12px rgba(15, 35, 32, 0.06);
-  --shadow-glow-accent: 0 8px 24px rgba(201, 162, 75, 0.28);
+  --shadow-sm: 0 1px 2px rgba(21, 19, 14, 0.04), 0 1px 1px rgba(21, 19, 14, 0.03);
+  --shadow-md: 0 4px 16px rgba(21, 19, 14, 0.06), 0 2px 6px rgba(21, 19, 14, 0.04);
+  --shadow-lg: 0 12px 32px rgba(21, 19, 14, 0.1), 0 4px 12px rgba(21, 19, 14, 0.05);
+  --shadow-glow-accent: 0 8px 24px rgba(54, 38, 217, 0.22);
 }
 
 @theme inline {
@@ -52,7 +58,7 @@
   --color-possible: var(--possible);
   --color-possible-tint: var(--possible-tint);
   --font-sans: "Inter Variable", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-  --font-display: "Playfair Display Variable", Georgia, "Times New Roman", serif;
+  --font-display: "Space Grotesk Variable", "Inter Variable", -apple-system, BlinkMacSystemFont, sans-serif;
   --font-ai-display: "Space Grotesk Variable", "Inter Variable", -apple-system, BlinkMacSystemFont, sans-serif;
 }
 
@@ -63,17 +69,11 @@ body {
   font-feature-settings: "cv11", "ss01";
 }
 
-h1, h2, h3, .font-display {
+/* One display font everywhere — product headings and landing headings both use Space Grotesk
+   now, so .font-ai-display (used by landing components) and .font-display (used by product
+   components) are aliases of the same rule instead of two separate systems. */
+h1, h2, h3, .font-display, .font-ai-display {
   font-family: var(--font-display);
-  letter-spacing: -0.01em;
-}
-
-/* Landing page uses its own display font (Space Grotesk) instead of the app-wide Playfair
-   Display. Scoped via .landing-page so /login, /signup, and the dashboard are untouched.
-   Same specificity as the rule above (element + class selectors) but declared later, and with
-   an extra ancestor class, so it wins the cascade inside .landing-page. */
-.landing-page h1, .landing-page h2, .landing-page h3, .landing-page .font-ai-display {
-  font-family: var(--font-ai-display);
   letter-spacing: -0.02em;
 }
 
@@ -94,25 +94,27 @@ h1, h2, h3, .font-display {
 .card-surface {
   background: #FFFFFF;
   border: 1px solid var(--brand-border);
-  border-radius: 18px;
+  border-radius: 16px;
   box-shadow: var(--shadow-sm);
 }
 
 .card-surface-interactive {
   background: #FFFFFF;
   border: 1px solid var(--brand-border);
-  border-radius: 18px;
+  border-radius: 16px;
   box-shadow: var(--shadow-sm);
   transition: box-shadow 0.25s cubic-bezier(0.22, 1, 0.36, 1), border-color 0.25s ease, transform 0.25s cubic-bezier(0.22, 1, 0.36, 1);
 }
 .card-surface-interactive:hover {
   box-shadow: var(--shadow-lg);
-  border-color: color-mix(in srgb, var(--brand-primary) 18%, var(--brand-border));
+  border-color: color-mix(in srgb, var(--brand-accent) 24%, var(--brand-border));
   transform: translateY(-3px);
 }
 
+/* Dark glass panel — used on top of .gradient-hero (login/signup), never as the main app chrome
+   (NavBar uses the light .ai-glass-card treatment instead, matching the landing nav). */
 .glass-surface {
-  background: rgba(11, 59, 55, 0.72);
+  background: rgba(21, 19, 14, 0.74);
   backdrop-filter: blur(14px) saturate(140%);
   -webkit-backdrop-filter: blur(14px) saturate(140%);
 }
@@ -132,11 +134,11 @@ h1, h2, h3, .font-display {
 }
 .input-field:focus {
   outline: none;
-  border-color: var(--brand-primary);
-  box-shadow: 0 0 0 3px rgba(11, 59, 55, 0.1);
+  border-color: var(--brand-accent);
+  box-shadow: 0 0 0 3px rgba(54, 38, 217, 0.12);
 }
 .input-field:hover:not(:focus) {
-  border-color: color-mix(in srgb, var(--brand-primary) 25%, var(--brand-border));
+  border-color: color-mix(in srgb, var(--brand-accent) 25%, var(--brand-border));
 }
 
 .label-text {
@@ -153,17 +155,21 @@ h1, h2, h3, .font-display {
 /* Buttons                                                                 */
 /* ---------------------------------------------------------------------- */
 
+/* Buttons match the landing page's editorial micro-label style — uppercase, letter-spaced,
+   bold, ink primary with an indigo "activation" hover — instead of a separate product style. */
 .btn-primary {
   background: var(--brand-primary);
-  color: white;
-  border-radius: 10px;
+  color: var(--background);
+  border-radius: 9px;
   padding: 10px 20px;
-  font-size: 14px;
-  font-weight: 600;
+  font-size: 12.5px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
   box-shadow: var(--shadow-sm);
   transition: background 0.2s ease, transform 0.15s cubic-bezier(0.22, 1, 0.36, 1), box-shadow 0.2s ease;
 }
-.btn-primary:hover { background: var(--brand-primary-light); box-shadow: var(--shadow-md); transform: translateY(-1px); }
+.btn-primary:hover { background: var(--brand-accent); box-shadow: var(--shadow-glow-accent); transform: translateY(-1px); }
 .btn-primary:active { transform: scale(0.98) translateY(0); }
 .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; transform: none; box-shadow: none; }
 
@@ -171,29 +177,35 @@ h1, h2, h3, .font-display {
   background: #FFFFFF;
   color: var(--brand-primary);
   border: 1px solid var(--brand-border);
-  border-radius: 10px;
+  border-radius: 9px;
   padding: 10px 20px;
-  font-size: 14px;
-  font-weight: 600;
+  font-size: 12.5px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
   transition: border-color 0.2s ease, background 0.2s ease, transform 0.15s cubic-bezier(0.22, 1, 0.36, 1);
 }
 .btn-secondary:hover { border-color: var(--brand-primary); background: var(--brand-cream); transform: translateY(-1px); }
 .btn-secondary:active { transform: scale(0.98) translateY(0); }
 
+/* Solid accent (indigo) — reserved for the AI-driven action on a screen (adding a project that
+   triggers matching, generating outreach), never a decorative default. */
 .btn-accent {
-  background: linear-gradient(135deg, var(--brand-accent-light), var(--brand-accent));
-  color: var(--brand-primary-dark);
-  border-radius: 10px;
+  background: var(--brand-accent);
+  color: #FFFFFF;
+  border-radius: 9px;
   padding: 10px 20px;
-  font-size: 14px;
+  font-size: 12.5px;
   font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
   box-shadow: var(--shadow-sm);
-  transition: box-shadow 0.2s ease, transform 0.15s cubic-bezier(0.22, 1, 0.36, 1), filter 0.2s ease;
+  transition: box-shadow 0.2s ease, transform 0.15s cubic-bezier(0.22, 1, 0.36, 1), background 0.2s ease;
 }
-.btn-accent:hover { box-shadow: var(--shadow-glow-accent); transform: translateY(-1px); filter: brightness(1.03); }
+.btn-accent:hover { box-shadow: var(--shadow-glow-accent); transform: translateY(-1px); background: var(--brand-accent-dark); }
 .btn-accent:active { transform: scale(0.98) translateY(0); }
 
-.btn-sm { padding: 6px 12px; font-size: 12.5px; border-radius: 8px; }
+.btn-sm { padding: 6px 12px; font-size: 10.5px; border-radius: 7px; }
 
 /* ---------------------------------------------------------------------- */
 /* Bucket badges                                                          */
@@ -203,19 +215,32 @@ h1, h2, h3, .font-display {
 .badge-warm { background: var(--warm-tint); color: var(--warm); }
 .badge-possible { background: var(--possible-tint); color: var(--possible); }
 .badge-muted { background: var(--brand-cream-deep); color: var(--brand-muted); }
-.badge { display: inline-flex; align-items: center; gap: 4px; padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 700; }
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
 
 /* ---------------------------------------------------------------------- */
 /* Misc utilities                                                          */
 /* ---------------------------------------------------------------------- */
 
 .gradient-hero {
-  background: radial-gradient(120% 140% at 15% -10%, var(--brand-primary-light) 0%, var(--brand-primary) 45%, var(--brand-primary-dark) 100%);
+  background:
+    radial-gradient(60% 50% at 85% 0%, rgba(54, 38, 217, 0.32), transparent 60%),
+    radial-gradient(120% 140% at 15% -10%, var(--brand-primary-light) 0%, var(--brand-primary) 45%, var(--brand-primary-dark) 100%);
 }
 
 .gradient-hero.texture-dots {
   background:
     radial-gradient(rgba(255, 255, 255, 0.10) 1px, transparent 1px) 0 0 / 18px 18px,
+    radial-gradient(60% 50% at 85% 0%, rgba(54, 38, 217, 0.32), transparent 60%),
     radial-gradient(120% 140% at 15% -10%, var(--brand-primary-light) 0%, var(--brand-primary) 45%, var(--brand-primary-dark) 100%);
 }
 
@@ -225,11 +250,13 @@ h1, h2, h3, .font-display {
 }
 
 /* ---------------------------------------------------------------------- */
-/* Landing page — AI intelligence visual system (bright / editorial)      */
-/* Scoped to the public marketing page only (src/components/landing/*).   */
-/* Warm off-white base, charcoal ink, ONE accent (deep indigo) used only  */
-/* to signal matching / intelligence / activation. The in-product UI      */
-/* above keeps its own calmer brand-* tokens untouched.                   */
+/* AI intelligence visual system (bright / editorial)                     */
+/* Originally the public landing page's system; now the app-wide design   */
+/* language (see --brand-* above, which mirrors these same values). These */
+/* --ai-... and .ai-... tokens/classes stay defined under their original names so */
+/* every landing component keeps working unchanged, and product          */
+/* components are free to reach for them directly (as NavBar does)        */
+/* instead of only going through the --brand-* aliases.                   */
 /* ---------------------------------------------------------------------- */
 
 :root {
