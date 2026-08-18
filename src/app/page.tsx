@@ -1,12 +1,15 @@
 import { getSession } from "@/lib/auth/session";
 import LandingNav from "@/components/landing/LandingNav";
 import Hero from "@/components/landing/Hero";
-import ProblemSection from "@/components/landing/ProblemSection";
+import DeadLeadGraveyard from "@/components/landing/DeadLeadGraveyard";
+import OldLeadNewOpportunity from "@/components/landing/OldLeadNewOpportunity";
 import HowItWorks from "@/components/landing/HowItWorks";
-import MatchDemoCard from "@/components/landing/MatchDemoCard";
-import TeamPrivacySection from "@/components/landing/TeamPrivacySection";
-import TeamResultsVisual from "@/components/landing/TeamResultsVisual";
-import PrivacyMessage from "@/components/landing/PrivacyMessage";
+import IntelligenceVsFilters from "@/components/landing/IntelligenceVsFilters";
+import MatchCard from "@/components/landing/MatchCard";
+import DatabaseAlive from "@/components/landing/DatabaseAlive";
+import ForIndividualAgents from "@/components/landing/ForIndividualAgents";
+import ForTeams from "@/components/landing/ForTeams";
+import BusinessValue from "@/components/landing/BusinessValue";
 import PricingSection from "@/components/landing/PricingSection";
 import FinalCTA from "@/components/landing/FinalCTA";
 import LandingFooter from "@/components/landing/LandingFooter";
@@ -20,12 +23,15 @@ export default async function LandingPage() {
     <div className="landing-page ai-bg flex flex-col">
       <LandingNav isLoggedIn={Boolean(session)} />
       <Hero />
-      <ProblemSection />
+      <DeadLeadGraveyard />
+      <OldLeadNewOpportunity />
       <HowItWorks />
-      <MatchDemoCard />
-      <TeamPrivacySection />
-      <TeamResultsVisual />
-      <PrivacyMessage />
+      <IntelligenceVsFilters />
+      <MatchCard />
+      <DatabaseAlive />
+      <ForIndividualAgents />
+      <ForTeams />
+      <BusinessValue />
       <PricingSection />
       <FinalCTA />
       <LandingFooter />

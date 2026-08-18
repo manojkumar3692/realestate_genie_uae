@@ -3,27 +3,27 @@ import { Sparkles } from "lucide-react";
 
 export default function LandingFooter() {
   return (
-    <footer className="py-10 border-t border-white/[0.06]" style={{ background: "var(--ai-surface)" }}>
+    <footer className="ai-bg py-8 border-t border-[var(--ai-border)]">
       <div className="max-w-6xl mx-auto px-4 md:px-6 flex flex-col sm:flex-row items-center justify-between gap-4">
         <div className="flex items-center gap-2">
-          <span
-            className="w-7 h-7 rounded-lg flex items-center justify-center text-white"
-            style={{ background: "linear-gradient(135deg, var(--ai-violet), var(--ai-cyan))" }}
-          >
-            <Sparkles size={14} strokeWidth={2.5} />
+          <span className="w-6 h-6 rounded-md flex items-center justify-center text-white" style={{ background: "var(--ai-ink)" }}>
+            <Sparkles size={12} strokeWidth={2.5} />
           </span>
-          <span className="text-sm text-white/60">
-            Real Estate Genie — <span className="text-white/35">AI Buyer Intelligence for Real Estate</span>
-          </span>
+          <span className="text-[13px] text-[var(--ai-ink-soft)]">Real Estate Genie</span>
         </div>
-        <div className="flex items-center gap-5 text-xs text-white/40">
-          <a href="#how-it-works" className="hover:text-white/70">
+        <div className="flex items-center gap-5 text-[12px] text-[var(--ai-ink-faint)] flex-wrap justify-center">
+          <a href="#how-it-works" className="hover:text-[var(--ai-ink)] transition-colors">
             How It Works
           </a>
-          <a href="#pricing" className="hover:text-white/70">
+          <a href="#teams" className="hover:text-[var(--ai-ink)] transition-colors">
+            For Teams
+          </a>
+          <a href="#pricing" className="hover:text-[var(--ai-ink)] transition-colors">
             Pricing
           </a>
-          <Link href="/login" className="hover:text-white/70">
+          <span className="hover:text-[var(--ai-ink)] transition-colors cursor-default">Privacy</span>
+          <span className="hover:text-[var(--ai-ink)] transition-colors cursor-default">Terms</span>
+          <Link href="/login" className="hover:text-[var(--ai-ink)] transition-colors">
             Sign In
           </Link>
         </div>

@@ -1,40 +1,43 @@
 import Link from "next/link";
-import HeroVisual from "./HeroVisual";
+import BuyerDataField from "./BuyerDataField";
 
 export default function Hero() {
   return (
     <section className="relative ai-bg overflow-hidden">
-      <div className="ai-grid-bg absolute inset-0 h-[640px]" />
-      <div className="ai-orb ai-pulse w-[420px] h-[420px] -top-32 -left-32" style={{ background: "var(--ai-violet)" }} />
-      <div className="ai-orb ai-pulse w-[360px] h-[360px] top-10 right-0" style={{ background: "var(--ai-cyan)", animationDelay: "2s" }} />
+      <div className="ai-grid-bg absolute inset-0" />
 
-      <div className="relative max-w-6xl mx-auto px-4 md:px-6 pt-16 pb-20 md:pt-24 md:pb-28 grid md:grid-cols-2 gap-12 md:gap-8 items-center">
-        <div>
-          <span className="inline-flex items-center gap-1.5 ai-glass-card rounded-full px-3.5 py-1.5 text-[11px] font-semibold text-[var(--ai-violet)] mb-6">
-            AI Buyer Intelligence for Real Estate
-          </span>
-          <h1 className="font-ai-display font-semibold text-[var(--ai-ink)] text-[2.5rem] leading-[1.08] md:text-6xl md:leading-[1.05] tracking-tight">
-            YOUR NEXT BUYER
+      <div className="relative max-w-[1400px] mx-auto px-4 md:px-8 pt-14 pb-16 md:pt-20 md:pb-0 grid md:grid-cols-12 gap-10 md:gap-4 items-center">
+        {/* Text sits in the left third — asymmetric on purpose, the data field is the star */}
+        <div className="md:col-span-5 md:col-start-1 relative z-10">
+          <span className="ai-badge ai-badge-accent mb-6">AI Buyer Intelligence for Real Estate</span>
+          <h1 className="font-ai-display font-semibold uppercase text-[var(--ai-ink)] text-[2.6rem] leading-[1.02] md:text-[3.4rem] lg:text-[3.75rem] md:leading-[0.98] tracking-tight">
+            Your next buyer
             <br />
-            MAY ALREADY BE
+            may already be
             <br />
-            <span className="ai-gradient-text italic">IN YOUR OLD LEADS.</span>
+            <span className="ai-mark">in your old leads.</span>
           </h1>
-          <p className="text-[var(--ai-ink)]/60 text-base md:text-lg mt-6 max-w-md leading-relaxed">
-            Upload your old CRM export. Add today&apos;s property project. Our AI finds the buyers worth contacting again — and tells you why.
+          <p className="text-[var(--ai-ink-soft)] text-base md:text-lg mt-6 max-w-sm leading-relaxed">
+            Upload your old leads. Add today&apos;s project. AI finds the buyers worth contacting again — and tells you why.
           </p>
           <div className="flex flex-col sm:flex-row gap-3 mt-8">
-            <Link href="/signup" className="ai-btn-primary text-center">
+            <Link href="/signup" className="ai-btn-primary">
               Find Buyers In My Leads
             </Link>
-            <a href="#how-it-works" className="ai-btn-secondary text-center">
-              See How It Works
+            <a href="#how-it-works" className="ai-btn-secondary">
+              See It In Action
             </a>
           </div>
-          <p className="text-[var(--ai-ink)]/40 text-xs mt-6 tracking-wide">CSV &amp; Excel · No CRM migration · Your leads stay private</p>
+          <p className="text-[var(--ai-ink-faint)] text-[11px] mt-7 tracking-wide uppercase">
+            CSV + Excel · No CRM migration · Your leads stay private
+          </p>
         </div>
 
-        <HeroVisual />
+        {/* The data field bleeds wide across the right two-thirds, overlapping the text column
+            slightly on large screens so the scene reads as the true subject of the hero. */}
+        <div className="md:col-span-8 md:col-start-5 relative">
+          <BuyerDataField />
+        </div>
       </div>
     </section>
   );
