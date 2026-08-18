@@ -8,11 +8,11 @@ export default async function LoginPage({ searchParams }: { searchParams: Promis
     <div className="min-h-screen gradient-hero texture-dots flex items-center justify-center px-4">
       <div className="w-full max-w-sm">
         <div className="flex flex-col items-center gap-3 mb-8">
-          <span className="w-12 h-12 rounded-2xl bg-gradient-to-br from-brand-accent-light to-brand-accent text-brand-primary-dark flex items-center justify-center shadow-[0_2px_8px_rgba(201,162,75,0.4)]">
+          <span className="w-12 h-12 rounded-2xl bg-brand-primary text-white flex items-center justify-center shadow-[0_2px_10px_rgba(54,38,217,0.4)]">
             <Building2 size={22} strokeWidth={2.5} />
           </span>
           <h1 className="text-2xl font-display font-semibold text-white">
-            Real Estate <span className="text-brand-accent-light italic">Genie</span>
+            Real Estate <span className="text-brand-accent">Genie</span>
           </h1>
           <p className="text-white/60 text-sm text-center">AI buyer intelligence & lead reactivation for your agency</p>
         </div>

@@ -4,20 +4,14 @@ import { motion } from "framer-motion";
 import { Lock } from "lucide-react";
 
 const AGENTS = [
-  { name: "Agent 01", buyers: "12,420", hot: 12, x: 10 },
-  { name: "Agent 02", buyers: "9,228", hot: 8, x: 27.5 },
-  { name: "Agent 03", buyers: "17,104", hot: 21, x: 50 },
-  { name: "Agent 04", buyers: "8,922", hot: 5, x: 72.5 },
-  { name: "Agent 05", buyers: "14,881", hot: 9, x: 90 },
+  { name: "Agent A", buyers: "12,420", hot: 12, x: 10 },
+  { name: "Agent B", buyers: "9,228", hot: 8, x: 27.5 },
+  { name: "Agent C", buyers: "17,104", hot: 21, x: 50 },
+  { name: "Agent D", buyers: "8,922", hot: 5, x: 72.5 },
+  { name: "Agent E", buyers: "14,881", hot: 9, x: 90 },
 ];
 const TOTAL_HOT = AGENTS.reduce((s, a) => s + a.hot, 0);
 
-/**
- * The third signature 3D moment: privacy communicated through genuine spatial separation rather
- * than padlock iconography. Five translucent "intelligence chambers" tilt independently in 3D
- * space — each holding its own buyer universe — fed only by a downward signal from the one
- * shared project above. No lines ever run chamber-to-chamber.
- */
 export default function ForTeams() {
   return (
     <section id="teams" className="relative ai-bg-deep py-24 md:py-32 overflow-hidden">
@@ -33,7 +27,7 @@ export default function ForTeams() {
           <h2 className="font-ai-display font-semibold uppercase text-3xl md:text-[2.5rem] tracking-tight text-[var(--ai-ink)] mt-2">
             Share projects.
             <br />
-            <span className="ai-mark">Not customers.</span>
+            <span className="ai-mark">Not customer lists.</span>
           </h2>
         </motion.div>
 
@@ -46,11 +40,11 @@ export default function ForTeams() {
             transition={{ duration: 0.5 }}
             className="relative z-10 ai-card-activated rounded-2xl px-6 py-4 w-fit mx-auto mb-2"
           >
-            <p className="ai-eyebrow">One Shared Project</p>
+            <p className="ai-eyebrow">Shared Project</p>
             <p className="font-ai-display font-semibold text-[var(--ai-ink)] mt-0.5">Dubai South Launch</p>
           </motion.div>
 
-          {/* downward-only signal lines — project to each chamber, never chamber to chamber */}
+          {/* downward-only signal lines — project to each vault, never vault to vault */}
           <svg className="hidden md:block absolute left-0 right-0 top-[64px] h-[120px] w-full pointer-events-none" viewBox="0 0 100 100" preserveAspectRatio="none">
             {AGENTS.map((a, i) => (
               <motion.line
@@ -69,41 +63,24 @@ export default function ForTeams() {
             ))}
           </svg>
 
-          <div
-            className="relative pt-10 md:pt-[130px] grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-4 md:gap-5"
-            style={{ perspective: 1400 }}
-          >
-            {AGENTS.map((a, i) => {
-              const tilt = (i - 2) * 3.2; // fan the chambers slightly, center-most nearly flat
-              return (
-                <motion.div
-                  key={a.name}
-                  initial={{ opacity: 0, y: 20 }}
-                  whileInView={{ opacity: 1, y: 0 }}
-                  viewport={{ once: true, margin: "-60px" }}
-                  transition={{ duration: 0.5, delay: 0.35 + i * 0.08 }}
-                  className="relative"
-                  style={{ transformStyle: "preserve-3d" }}
-                >
-                  <div
-                    className="ai-card rounded-xl p-4 flex flex-col items-center gap-1.5 text-center relative overflow-hidden"
-                    style={{ transform: `rotateY(${tilt}deg) translateZ(${Math.abs(i - 2) * -4}px)`, transformStyle: "preserve-3d" }}
-                  >
-                    {/* translucent chamber sheen — reads as a sealed volume, not a flat card */}
-                    <div
-                      className="absolute inset-0 pointer-events-none"
-                      style={{ background: "linear-gradient(155deg, rgba(255,255,255,0.5), transparent 55%)" }}
-                    />
-                    <p className="relative text-sm font-semibold text-[var(--ai-ink)]">{a.name}</p>
-                    <p className="relative text-xs text-[var(--ai-ink-faint)]">{a.buyers} Buyers</p>
-                    <span className="relative ai-badge mt-1">
-                      <Lock size={9} /> Private
-                    </span>
-                    <span className="relative ai-badge ai-badge-hot">{a.hot} Hot</span>
-                  </div>
-                </motion.div>
-              );
-            })}
+          <div className="relative pt-10 md:pt-[120px] grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-3 md:gap-4">
+            {AGENTS.map((a, i) => (
+              <motion.div
+                key={a.name}
+                initial={{ opacity: 0, y: 16 }}
+                whileInView={{ opacity: 1, y: 0 }}
+                viewport={{ once: true, margin: "-60px" }}
+                transition={{ duration: 0.4, delay: 0.35 + i * 0.08 }}
+                className="ai-card rounded-xl p-4 flex flex-col items-center gap-1.5 text-center"
+              >
+                <p className="text-sm font-semibold text-[var(--ai-ink)]">{a.name}</p>
+                <p className="text-xs text-[var(--ai-ink-faint)]">{a.buyers} Buyers</p>
+                <span className="ai-badge mt-1">
+                  <Lock size={9} /> Private
+                </span>
+                <span className="ai-badge ai-badge-hot">{a.hot} Hot</span>
+              </motion.div>
+            ))}
           </div>
         </div>
 
