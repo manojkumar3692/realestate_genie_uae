@@ -9,6 +9,7 @@ import { hashPassword, verifyPassword } from "./password";
 import { createSessionToken, setSessionCookie, clearSessionCookie } from "./session";
 import { requireAdmin } from "./requireSession";
 import { logAudit } from "@/lib/audit";
+import { isPlanKey, type PlanKey } from "@/lib/pricing/config";
 
 function fail(path: string, message: string): never {
   redirect(`${path}?error=${encodeURIComponent(message)}`);
@@ -21,6 +22,10 @@ export async function signupAction(formData: FormData): Promise<void> {
     .trim()
     .toLowerCase();
   const password = String(formData.get("password") || "");
+  const planInput = String(formData.get("plan") || "");
+  const plan: PlanKey = isPlanKey(planInput) ? planInput : "individual";
+  const regionInput = String(formData.get("region") || "").toUpperCase();
+  const region = regionInput === "IN" ? "india" : "uae";
 
   if (!orgName || !name || !email || !password) fail("/signup", "Please fill in every field.");
   if (password.length < 8) fail("/signup", "Password must be at least 8 characters.");
@@ -30,7 +35,10 @@ export async function signupAction(formData: FormData): Promise<void> {
   if (existing) fail("/signup", "An account with that email already exists — try logging in instead.");
 
   const orgId = newId("org");
-  await db.insert(organizations).values({ id: orgId, name: orgName });
+  // `type` mirrors the chosen plan for now (no payment gateway yet — signup only records the
+  // plan the person picked; see src/lib/pricing/config.ts). Team-specific behavior (multi-seat
+  // invites, per-agent privacy) is a separate follow-up, not gated on this field yet.
+  await db.insert(organizations).values({ id: orgId, name: orgName, type: plan, planKey: plan, region });
 
   const userId = newId("user");
   const passwordHash = await hashPassword(password);
@@ -44,11 +52,11 @@ export async function signupAction(formData: FormData): Promise<void> {
     role: "admin",
   });
 
-  await logAudit({ orgId, userId, action: "org.created", entityType: "organization", entityId: orgId });
+  await logAudit({ orgId, userId, action: "org.created", entityType: "organization", entityId: orgId, metadata: { plan, region } });
 
   const token = await createSessionToken({ sub: userId, orgId, role: "admin", email, name });
   await setSessionCookie(token);
-  redirect("/");
+  redirect("/dashboard");
 }
 
 export async function loginAction(formData: FormData): Promise<void> {
@@ -70,7 +78,7 @@ export async function loginAction(formData: FormData): Promise<void> {
     name: user!.name,
   });
   await setSessionCookie(token);
-  redirect("/");
+  redirect("/dashboard");
 }
 
 export async function logoutAction(): Promise<void> {

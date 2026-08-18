@@ -8,7 +8,7 @@ import { motion } from "framer-motion";
 import { logoutAction } from "@/lib/auth/actions";
 
 const DESKTOP_LINKS = [
-  { href: "/", label: "Dashboard" },
+  { href: "/dashboard", label: "Dashboard" },
   { href: "/leads", label: "Leads" },
   { href: "/projects", label: "Projects" },
   { href: "/contact-today", label: "Contact Today" },
@@ -17,7 +17,7 @@ const DESKTOP_LINKS = [
 ];
 
 const MOBILE_TABS = [
-  { href: "/", label: "Home", icon: LayoutDashboard },
+  { href: "/dashboard", label: "Home", icon: LayoutDashboard },
   { href: "/leads", label: "Leads", icon: Users },
   { href: "/projects", label: "Projects", icon: FolderKanban },
   { href: "/contact-today", label: "Today", icon: PhoneCall },
@@ -26,7 +26,7 @@ const MOBILE_TABS = [
 export default function NavBar({ userName, userEmail }: { userName: string; userEmail: string }) {
   const pathname = usePathname();
   const router = useRouter();
-  const isActive = (href: string) => (href === "/" ? pathname === "/" : pathname.startsWith(href));
+  const isActive = (href: string) => (href === "/dashboard" ? pathname === "/dashboard" : pathname.startsWith(href));
 
   function handleSearch(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -38,7 +38,7 @@ export default function NavBar({ userName, userEmail }: { userName: string; user
     <>
       <header className="sticky top-0 z-40 glass-surface border-b border-white/10 shadow-[0_4px_20px_rgba(7,39,34,0.18)]">
         <div className="max-w-7xl mx-auto px-4 md:px-6 h-16 flex items-center justify-between gap-4">
-          <Link href="/" className="flex items-center gap-2.5 group shrink-0">
+          <Link href="/dashboard" className="flex items-center gap-2.5 group shrink-0">
             <span className="w-9 h-9 rounded-xl bg-gradient-to-br from-brand-accent-light to-brand-accent text-brand-primary-dark flex items-center justify-center shadow-[0_2px_8px_rgba(201,162,75,0.4)] transition-transform group-hover:scale-105 group-hover:rotate-3">
               <Building2 size={18} strokeWidth={2.5} />
             </span>

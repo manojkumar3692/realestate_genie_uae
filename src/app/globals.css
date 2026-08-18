@@ -53,6 +53,7 @@
   --color-possible-tint: var(--possible-tint);
   --font-sans: "Inter Variable", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   --font-display: "Playfair Display Variable", Georgia, "Times New Roman", serif;
+  --font-ai-display: "Space Grotesk Variable", "Inter Variable", -apple-system, BlinkMacSystemFont, sans-serif;
 }
 
 body {
@@ -65,6 +66,15 @@ body {
 h1, h2, h3, .font-display {
   font-family: var(--font-display);
   letter-spacing: -0.01em;
+}
+
+/* Landing page uses its own display font (Space Grotesk) instead of the app-wide Playfair
+   Display. Scoped via .landing-page so /login, /signup, and the dashboard are untouched.
+   Same specificity as the rule above (element + class selectors) but declared later, and with
+   an extra ancestor class, so it wins the cascade inside .landing-page. */
+.landing-page h1, .landing-page h2, .landing-page h3, .landing-page .font-ai-display {
+  font-family: var(--font-ai-display);
+  letter-spacing: -0.02em;
 }
 
 ::-webkit-scrollbar { width: 10px; height: 10px; }
@@ -212,4 +222,191 @@ h1, h2, h3, .font-display {
 .texture-dots:not(.gradient-hero) {
   background-image: radial-gradient(rgba(255, 255, 255, 0.10) 1px, transparent 1px);
   background-size: 18px 18px;
+}
+
+/* ---------------------------------------------------------------------- */
+/* Landing page — AI intelligence visual system (bright / editorial)      */
+/* Scoped to the public marketing page only (src/components/landing/*).   */
+/* Warm off-white base, charcoal ink, ONE accent (deep indigo) used only  */
+/* to signal matching / intelligence / activation. The in-product UI      */
+/* above keeps its own calmer brand-* tokens untouched.                   */
+/* ---------------------------------------------------------------------- */
+
+:root {
+  --ai-bg: #F6F3EC;
+  --ai-bg-deep: #EDE8DB;
+  --ai-surface: #FFFFFF;
+  --ai-ink: #15130E;
+  --ai-ink-soft: rgba(21, 19, 14, 0.62);
+  --ai-ink-faint: rgba(21, 19, 14, 0.40);
+  --ai-ink-ghost: rgba(21, 19, 14, 0.18);
+  --ai-border: rgba(21, 19, 14, 0.11);
+  --ai-border-strong: rgba(21, 19, 14, 0.2);
+  --ai-accent: #3626D9;
+  --ai-accent-2: #241AA3;
+  --ai-accent-soft: rgba(54, 38, 217, 0.07);
+  --ai-accent-line: rgba(54, 38, 217, 0.38);
+  --ai-accent-glow: rgba(54, 38, 217, 0.16);
+  --ai-hot: #B7410E;
+  --ai-hot-soft: rgba(183, 65, 14, 0.08);
+  --ai-positive: #15803D;
+  --ai-mono-font: "SF Mono", ui-monospace, "Roboto Mono", Menlo, Consolas, monospace;
+}
+
+.ai-bg {
+  background:
+    radial-gradient(ellipse 60% 40% at 82% 0%, rgba(54, 38, 217, 0.05), transparent 60%),
+    var(--ai-bg);
+}
+
+.ai-bg-deep { background: var(--ai-bg-deep); }
+.ai-bg-ink { background: var(--ai-ink); }
+.ai-bg-surface { background: var(--ai-surface); }
+
+.ai-grain {
+  background-image: radial-gradient(rgba(21, 19, 14, 0.05) 1px, transparent 1px);
+  background-size: 3px 3px;
+}
+
+/* Emphasis: solid accent color, never a gradient — used for the one key
+   phrase inside a headline ("IN YOUR OLD LEADS.", "INTELLIGENCE.") */
+.ai-mark { color: var(--ai-accent); }
+
+/* Tabular, weighted treatment for the big stat numbers (10,482 / 347 / 94%) */
+.ai-num {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+  letter-spacing: -0.02em;
+}
+
+.ai-mono { font-family: var(--ai-mono-font); }
+
+.ai-eyebrow {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--ai-accent);
+}
+
+.ai-card {
+  background: var(--ai-surface);
+  border: 1px solid var(--ai-border);
+  border-radius: 16px;
+  box-shadow: 0 1px 2px rgba(21, 19, 14, 0.04), 0 12px 32px rgba(21, 19, 14, 0.05);
+}
+
+/* "Activated" / matched state — the one place accent-glow appears, always
+   tied to something the AI has actually selected, never decorative. */
+.ai-card-activated {
+  background: var(--ai-surface);
+  border: 1px solid var(--ai-accent);
+  border-radius: 16px;
+  box-shadow: 0 1px 2px rgba(21, 19, 14, 0.04), 0 16px 40px var(--ai-accent-glow);
+}
+
+.ai-glass-card {
+  background: rgba(255, 255, 255, 0.72);
+  backdrop-filter: blur(16px) saturate(140%);
+  -webkit-backdrop-filter: blur(16px) saturate(140%);
+  border: 1px solid var(--ai-border);
+  box-shadow: 0 1px 2px rgba(21, 19, 14, 0.04), 0 12px 28px rgba(21, 19, 14, 0.06);
+}
+
+.ai-grid-bg {
+  background-image: linear-gradient(rgba(21, 19, 14, 0.05) 1px, transparent 1px), linear-gradient(90deg, rgba(21, 19, 14, 0.05) 1px, transparent 1px);
+  background-size: 44px 44px;
+  mask-image: radial-gradient(ellipse 80% 60% at 50% 0%, black 40%, transparent 100%);
+}
+
+.ai-hairline { border-color: var(--ai-border); }
+
+/* Thin connecting line used to represent an inferred relationship between
+   two records — the only "wire" motif in the system, used sparingly. */
+.ai-signal-line { background: var(--ai-accent-line); }
+
+.ai-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  background: rgba(21, 19, 14, 0.06);
+  color: var(--ai-ink-soft);
+}
+.ai-badge-accent { background: var(--ai-accent-soft); color: var(--ai-accent); }
+.ai-badge-hot { background: var(--ai-hot-soft); color: var(--ai-hot); }
+.ai-badge-dark { background: var(--ai-ink); color: var(--ai-bg); }
+
+.ai-btn-primary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--ai-ink);
+  color: var(--ai-bg);
+  border-radius: 9px;
+  padding: 14px 26px;
+  font-size: 12.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  box-shadow: 0 1px 2px rgba(21, 19, 14, 0.08);
+  transition: transform 0.2s cubic-bezier(0.22, 1, 0.36, 1), background 0.2s ease, box-shadow 0.2s ease;
+}
+.ai-btn-primary:hover { background: var(--ai-accent); box-shadow: 0 10px 24px var(--ai-accent-glow); transform: translateY(-2px); }
+.ai-btn-primary:active { transform: translateY(0) scale(0.98); }
+
+.ai-btn-secondary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  color: var(--ai-ink);
+  border: 1px solid var(--ai-border-strong);
+  border-radius: 9px;
+  padding: 14px 26px;
+  font-size: 12.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  transition: background 0.2s ease, border-color 0.2s ease, transform 0.2s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.ai-btn-secondary:hover { background: rgba(21, 19, 14, 0.04); border-color: var(--ai-ink); transform: translateY(-2px); }
+
+.ai-btn-ghost {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ai-ink);
+  font-size: 12.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  border-bottom: 1px solid var(--ai-border-strong);
+  padding-bottom: 2px;
+  transition: border-color 0.2s ease, color 0.2s ease;
+}
+.ai-btn-ghost:hover { border-color: var(--ai-ink); color: var(--ai-accent); }
+
+@keyframes ai-float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-10px); }
+}
+.ai-float { animation: ai-float 7s ease-in-out infinite; }
+
+/* Small signal "ping" — the one animated dot motif used to mark an active
+   match, never a full-bleed glow orb. */
+@keyframes ai-ping {
+  0% { box-shadow: 0 0 0 0 var(--ai-accent-glow); }
+  70% { box-shadow: 0 0 0 8px rgba(54, 38, 217, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(54, 38, 217, 0); }
+}
+.ai-ping { animation: ai-ping 2.2s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
+
+@media (prefers-reduced-motion: reduce) {
+  .ai-float, .ai-ping { animation: none; }
 }
