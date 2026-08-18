@@ -36,6 +36,13 @@ export interface MatchCustomerInput {
   inferredObjections?: string[];
   inferredDeveloperPreferences?: string[];
   inferredPurchaseReadiness?: Readiness;
+  // LIVE layer — learned from the outcome loop after a real contact attempt (Budget Changed /
+  // Different Location / Not Now). Takes precedence over both stated and AI-inferred when
+  // present: it's the freshest, most direct signal we have. See customerLiveSignals in schema.ts.
+  liveBudgetMin?: number | null;
+  liveBudgetMax?: number | null;
+  liveLocations?: string[];
+  livePurchaseReadiness?: Readiness;
 }
 
 export interface MatchProjectInput {
@@ -84,7 +91,7 @@ const DEVELOPER_BONUS = 2;
 
 export function scoreMatch(customer: MatchCustomerInput, project: MatchProjectInput, now: Date): MatchScoreResult {
   // --- Hard exclusions -----------------------------------------------------
-  if (customer.doNotContact || ["do_not_contact", "invalid", "won"].includes(customer.status)) {
+  if (customer.doNotContact || ["do_not_contact", "invalid", "won", "lost_elsewhere"].includes(customer.status)) {
     return {
       totalScore: 0,
       bucket: "none",
@@ -92,6 +99,8 @@ export function scoreMatch(customer: MatchCustomerInput, project: MatchProjectIn
       excludeReason:
         customer.status === "won"
           ? "Customer already purchased."
+          : customer.status === "lost_elsewhere"
+          ? "Customer bought a property elsewhere."
           : customer.doNotContact
           ? "Customer requested no further contact."
           : "Customer marked invalid.",
@@ -101,13 +110,20 @@ export function scoreMatch(customer: MatchCustomerInput, project: MatchProjectIn
     };
   }
 
-  const effBudgetMin = customer.inferredBudgetMin ?? customer.budgetMin;
-  const effBudgetMax = customer.inferredBudgetMax ?? customer.budgetMax;
-  const effLocations = uniq([...(customer.preferredLocations ?? []), ...(customer.inferredLocations ?? [])]);
+  // Live (outcome-loop) values win over AI-inferred, which win over stated — freshest signal
+  // wins for anything numeric/single-valued. Locations stay a union: a buyer opening up to a new
+  // area doesn't necessarily rule out the old one.
+  const effBudgetMin = customer.liveBudgetMin ?? customer.inferredBudgetMin ?? customer.budgetMin;
+  const effBudgetMax = customer.liveBudgetMax ?? customer.inferredBudgetMax ?? customer.budgetMax;
+  const effLocations = uniq([
+    ...(customer.preferredLocations ?? []),
+    ...(customer.inferredLocations ?? []),
+    ...(customer.liveLocations ?? []),
+  ]);
   const effBedroomLabels = uniq([...(customer.bedrooms ?? []), ...(customer.inferredBedrooms ?? [])]);
   const effPropertyTypes = uniq([...(customer.propertyTypes ?? []), ...(customer.inferredPropertyTypes ?? [])]);
   const effPurpose = customer.inferredPurpose ?? customer.purpose;
-  const effReadiness = customer.inferredPurchaseReadiness ?? customer.purchaseReadiness;
+  const effReadiness = customer.livePurchaseReadiness ?? customer.inferredPurchaseReadiness ?? customer.purchaseReadiness;
   const effPaymentSignals = uniq([
     customer.paymentPlanPreference,
     ...(customer.inferredPaymentPreferences ?? []),
@@ -145,7 +161,7 @@ export function scoreMatch(customer: MatchCustomerInput, project: MatchProjectIn
   rawTotal += developerBonus;
 
   // --- Negative signals (spec section 31) — heavily discount, don't just subtract points ---
-  const { multiplier, concerns: negativeConcerns } = applyNegativeSignals(customer, effBedroomLabels, effPropertyTypes, project);
+  const { multiplier, concerns: negativeConcerns } = applyNegativeSignals(customer, effBedroomLabels, effPropertyTypes, effBudgetMax, project);
   const totalScore = Math.max(0, Math.min(100, Math.round(rawTotal * multiplier)));
 
   const positives = buildPositives(breakdown, developerBonus, project);
@@ -312,6 +328,7 @@ function applyNegativeSignals(
   customer: MatchCustomerInput,
   effBedroomLabels: string[],
   effPropertyTypes: string[],
+  effMax: number | null,
   project: MatchProjectInput
 ): { multiplier: number; concerns: string[] } {
   let multiplier = 1;
@@ -326,7 +343,6 @@ function applyNegativeSignals(
     concerns.push("Customer previously wanted off-plan only; this project is ready.");
   }
 
-  const effMax = customer.inferredBudgetMax ?? customer.budgetMax;
   if (effMax && project.startingPrice && effMax < project.startingPrice * 0.6) {
     multiplier *= 0.3;
     concerns.push("Customer's budget appears well below this project's starting price.");

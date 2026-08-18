@@ -5,20 +5,10 @@ import Link from "next/link";
 import { ChevronDown, ChevronUp, MessageCircle, Copy, Check } from "lucide-react";
 import BucketBadge from "@/components/ui/BucketBadge";
 import ScoreBreakdownBars from "@/components/ui/ScoreBreakdownBars";
+import OutcomeButtons from "@/components/ui/OutcomeButtons";
 import { formatMoney } from "@/lib/normalize/budget";
 import { updateOutcomeAction, generateOutreachAction } from "@/app/(app)/projects/[id]/matches/actions";
 import type { MatchResultRow } from "@/db/repoMatching";
-
-const OUTCOME_OPTIONS = [
-  ["not_contacted", "Not Contacted"],
-  ["contacted", "Contacted"],
-  ["no_response", "No Response"],
-  ["interested", "Interested"],
-  ["not_interested", "Not Interested"],
-  ["viewing", "Viewing"],
-  ["booked", "Booked"],
-  ["purchased", "Purchased"],
-] as const;
 
 export default function MatchResultsTable({ matches }: { matches: MatchResultRow[] }) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -36,51 +26,43 @@ export default function MatchResultsTable({ matches }: { matches: MatchResultRow
     <div className="flex flex-col gap-3">
       {matches.map((m) => (
         <div key={m.matchId} className="card-surface overflow-hidden">
-          <div className="p-4 flex flex-col md:flex-row md:items-center gap-3">
-            <div className="flex-1 min-w-0">
-              <div className="flex items-center gap-2 flex-wrap">
-                <Link href={`/leads/${m.customerId}`} className="font-medium hover:text-brand-primary">
-                  {m.customerName}
-                </Link>
-                <BucketBadge bucket={m.bucket} />
-                <span className="text-xs font-semibold text-brand-muted">{m.totalScore}/100</span>
-                {m.hasLimitedData && (
-                  <span
-                    className="badge badge-muted"
-                    title="We have little to no stated or AI-inferred data on this lead yet — this score reflects neutral defaults, not a confirmed fit. Worth a discovery call to find out more."
-                  >
-                    Limited data
-                  </span>
-                )}
+          <div className="p-4 flex flex-col gap-3">
+            <div className="flex flex-col md:flex-row md:items-center gap-3">
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <Link href={`/leads/${m.customerId}`} className="font-medium hover:text-brand-primary">
+                    {m.customerName}
+                  </Link>
+                  <BucketBadge bucket={m.bucket} />
+                  <span className="text-xs font-semibold text-brand-muted">{m.totalScore}/100</span>
+                  {m.hasLimitedData && (
+                    <span
+                      className="badge badge-muted"
+                      title="We have little to no stated or AI-inferred data on this lead yet — this score reflects neutral defaults, not a confirmed fit. Worth a discovery call to find out more."
+                    >
+                      Limited data
+                    </span>
+                  )}
+                </div>
+                <p className="text-xs text-brand-muted mt-0.5">
+                  {formatMoney(m.budgetMin, m.budgetCurrency)}–{formatMoney(m.budgetMax, m.budgetCurrency)}
+                  {m.budgetIsInferred && <span className="italic"> (AI-inferred from notes)</span>} · {m.preferredLocations.join(", ") || "Any area"} ·{" "}
+                  {m.bedrooms.join(", ") || "Any unit"}
+                </p>
+                {m.positives[0] && <p className="text-sm mt-1.5">{m.positives[0]}</p>}
               </div>
-              <p className="text-xs text-brand-muted mt-0.5">
-                {formatMoney(m.budgetMin, m.budgetCurrency)}–{formatMoney(m.budgetMax, m.budgetCurrency)}
-                {m.budgetIsInferred && <span className="italic"> (AI-inferred from notes)</span>} · {m.preferredLocations.join(", ") || "Any area"} ·{" "}
-                {m.bedrooms.join(", ") || "Any unit"}
-              </p>
-              {m.positives[0] && <p className="text-sm mt-1.5">{m.positives[0]}</p>}
-            </div>
 
-            <div className="flex items-center gap-2 shrink-0">
-              <select
-                value={outcomes[m.matchId]}
-                onChange={(e) => {
-                  const value = e.target.value;
-                  setOutcomes((prev) => ({ ...prev, [m.matchId]: value }));
-                  updateOutcomeAction(m.matchId, value);
-                }}
-                className="input-field py-1.5 text-xs w-[130px]"
-              >
-                {OUTCOME_OPTIONS.map(([value, label]) => (
-                  <option key={value} value={value}>
-                    {label}
-                  </option>
-                ))}
-              </select>
-              <button onClick={() => toggle(m.matchId)} className="btn-secondary btn-sm flex items-center gap-1">
+              <button onClick={() => toggle(m.matchId)} className="btn-secondary btn-sm flex items-center gap-1 shrink-0 self-start md:self-auto">
                 Why Match {expanded.has(m.matchId) ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
               </button>
             </div>
+
+            <OutcomeButtons
+              matchId={m.matchId}
+              initialOutcomeStatus={outcomes[m.matchId]}
+              onSubmit={updateOutcomeAction}
+              onLogged={(result) => setOutcomes((prev) => ({ ...prev, [m.matchId]: result.outcomeStatus }))}
+            />
           </div>
 
           {expanded.has(m.matchId) && <MatchDetail match={m} />}

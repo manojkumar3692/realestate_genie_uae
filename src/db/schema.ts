@@ -177,8 +177,12 @@ export const customers = pgTable(
     email: text("email").notNull().default(""),
     normalizedEmail: text("normalized_email").notNull().default(""),
     nationality: text("nationality").notNull().default(""),
+    // "lost_elsewhere" is set by the outcome loop's "Bought Elsewhere" button — the customer
+    // bought a property through someone else. Hard-excluded from matching everywhere (see
+    // score.ts), same as won/do_not_contact/invalid, so a dead lead stops surfacing org-wide the
+    // moment an agent logs it, not just on the project they happened to be looking at.
     status: text("status", {
-      enum: ["new", "contacted", "lost", "won", "dormant", "do_not_contact", "invalid"],
+      enum: ["new", "contacted", "lost", "won", "dormant", "do_not_contact", "invalid", "lost_elsewhere"],
     })
       .notNull()
       .default("new"),
@@ -341,6 +345,40 @@ export const customerInferences = pgTable("customer_inferences", {
   lastInferredAt: timestamp("last_inferred_at", { withTimezone: true }),
 });
 
+// LIVE layer — append-only history of buyer intelligence learned from agent outcome feedback
+// after a match was contacted (the "Living Buyer Profile" loop). Separate from both the
+// normalized (customerPreferences) and AI-inferred-from-notes (customerInferences) layers on
+// purpose: an agent's live report ("budget changed to 900k") should win over stale import/AI
+// data without silently erasing it, and every update stays queryable as history, never
+// overwritten in place. Scoring reads only the latest row per (customerId, field).
+export const customerLiveSignals = pgTable(
+  "customer_live_signals",
+  {
+    id: text("id").primaryKey(),
+    customerId: text("customer_id")
+      .notNull()
+      .references(() => customers.id, { onDelete: "cascade" }),
+    // The match/project this outcome was logged against, if any (contact-today's list view can
+    // log outcomes without a specific match in view being open... it always has one — the row
+    // itself is a match — so this is set whenever we have it; null is only a defensive fallback).
+    matchId: text("match_id").references(() => projectMatches.id, { onDelete: "set null" }),
+    outcomeStatus: text("outcome_status").notNull(), // mirrors the button tapped, e.g. "budget_changed"
+    field: text("field", { enum: ["budget", "location", "readiness", "none"] }).notNull(),
+    rawAnswer: text("raw_answer").notNull().default(""), // the agent's own words, always kept verbatim
+    // Structured result once interpreted (deterministic parser and/or AI) — shape depends on
+    // `field`: {min,max,currency} for budget, {locations:[canonical...]} for location,
+    // {readiness, note} for a "not now" timing hint. Empty object if interpretation failed.
+    structuredValueJson: jsonb("structured_value_json").$type<Record<string, unknown>>().notNull().default({}),
+    interpretedBy: text("interpreted_by", { enum: ["ai", "deterministic", "none"] }).notNull().default("none"),
+    confidence: real("confidence").notNull().default(0),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`now()`),
+  },
+  (t) => [
+    index("customer_live_signals_customer_idx").on(t.customerId, t.field, t.createdAt),
+    index("customer_live_signals_match_idx").on(t.matchId),
+  ]
+);
+
 export const duplicateCandidates = pgTable(
   "duplicate_candidates",
   {
@@ -483,6 +521,12 @@ export const projectMatches = pgTable(
     explanationSource: text("explanation_source", { enum: ["ai", "template"] })
       .notNull()
       .default("template"),
+    // The outcome loop is 7 buttons, not a CRM pipeline (see AGENTS notes / product spec §6):
+    // Interested, Not Now, Budget Changed, Different Location, Not Interested, Bought Elsewhere,
+    // No Response. "not_contacted" is the implicit starting state before any button is tapped —
+    // it's never itself a button. The old pipeline-stage values (contacted/viewing/booked/
+    // purchased) are kept here only so existing rows keep typechecking; nothing in the UI writes
+    // them anymore.
     outcomeStatus: text("outcome_status", {
       enum: [
         "not_contacted",
@@ -493,6 +537,10 @@ export const projectMatches = pgTable(
         "viewing",
         "booked",
         "purchased",
+        "not_now",
+        "budget_changed",
+        "different_location",
+        "bought_elsewhere",
       ],
     })
       .notNull()
@@ -618,6 +666,12 @@ export const customersRelations = relations(customers, ({ many, one }) => ({
     references: [customerInferences.customerId],
   }),
   matches: many(projectMatches),
+  liveSignals: many(customerLiveSignals),
+}));
+
+export const customerLiveSignalsRelations = relations(customerLiveSignals, ({ one }) => ({
+  customer: one(customers, { fields: [customerLiveSignals.customerId], references: [customers.id] }),
+  match: one(projectMatches, { fields: [customerLiveSignals.matchId], references: [projectMatches.id] }),
 }));
 
 export const projectsRelations = relations(projects, ({ many, one }) => ({

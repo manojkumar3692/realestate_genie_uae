@@ -6,6 +6,7 @@ import { scoreMatch, type MatchCustomerInput, type MatchProjectInput } from "@/l
 import { generateMatchExplanations, type MatchExplanationInput } from "@/lib/ai/generateMatchExplanation";
 import { generateOutreachMessages, templateOutreach, type OutreachInput } from "@/lib/ai/generateOutreach";
 import { extractBuyerProfiles, type BuyerProfileInput } from "@/lib/ai/extractBuyerProfile";
+import { interpretOutcomeFollowup, type FollowupOutcome } from "@/lib/ai/interpretOutcomeFollowup";
 import { formatMoney } from "@/lib/normalize/budget";
 import { logAudit } from "@/lib/audit";
 
@@ -48,13 +49,14 @@ export async function runMatchingForProject(projectId: string, orgId: string, ac
   const customers = await db.query.customers.findMany({
     where: and(eq(schema.customers.orgId, orgId), ne(schema.customers.status, "won")),
   });
-  const eligible = customers.filter((c) => !c.doNotContact && c.status !== "invalid" && c.status !== "do_not_contact");
+  const eligible = customers.filter((c) => !c.doNotContact && c.status !== "invalid" && c.status !== "do_not_contact" && c.status !== "lost_elsewhere");
   const customerIds = eligible.map((c) => c.id);
 
-  const [allPrefs, allInferences, allInteractions] = await Promise.all([
+  const [allPrefs, allInferences, allInteractions, allLiveSignals] = await Promise.all([
     db.query.customerPreferences.findMany({ where: inArray(schema.customerPreferences.customerId, customerIds) }),
     db.query.customerInferences.findMany({ where: inArray(schema.customerInferences.customerId, customerIds) }),
     db.query.customerInteractions.findMany({ where: inArray(schema.customerInteractions.customerId, customerIds) }),
+    db.query.customerLiveSignals.findMany({ where: inArray(schema.customerLiveSignals.customerId, customerIds) }),
   ]);
   const prefsByCustomer = new Map(allPrefs.map((p) => [p.customerId, p]));
   const inferByCustomer = new Map(allInferences.map((p) => [p.customerId, p]));
@@ -68,43 +70,24 @@ export async function runMatchingForProject(projectId: string, orgId: string, ac
       distinctProjectsByCustomer.get(i.customerId)!.add(i.projectMentioned.toLowerCase());
     }
   }
+  const liveSignalsByCustomer = new Map<string, (typeof schema.customerLiveSignals.$inferSelect)[]>();
+  for (const s of allLiveSignals) {
+    if (!liveSignalsByCustomer.has(s.customerId)) liveSignalsByCustomer.set(s.customerId, []);
+    liveSignalsByCustomer.get(s.customerId)!.push(s);
+  }
 
   const now = new Date();
   const results: Array<{ customer: (typeof eligible)[number]; result: ReturnType<typeof scoreMatch> }> = [];
 
   for (const c of eligible) {
-    const prefs = prefsByCustomer.get(c.id);
-    const inference = inferByCustomer.get(c.id);
-    const input: MatchCustomerInput = {
-      id: c.id,
-      doNotContact: c.doNotContact,
-      status: c.status,
-      budgetMin: prefs?.budgetMin ?? null,
-      budgetMax: prefs?.budgetMax ?? null,
-      budgetCurrency: prefs?.budgetCurrency ?? "AED",
-      preferredLocations: prefs?.preferredLocations ?? [],
-      preferredDevelopers: prefs?.preferredDevelopers ?? [],
-      bedrooms: prefs?.bedrooms ?? [],
-      propertyTypes: prefs?.propertyTypes ?? [],
-      purpose: (prefs?.purpose as MatchCustomerInput["purpose"]) ?? "unclear",
-      paymentPlanPreference: prefs?.paymentPlanPreference ?? "",
-      readyOrOffplanPreference: (prefs?.readyOrOffplanPreference as MatchCustomerInput["readyOrOffplanPreference"]) ?? "either",
-      purchaseReadiness: (prefs?.purchaseReadiness as MatchCustomerInput["purchaseReadiness"]) ?? "unknown",
-      lostReason: prefs?.lostReason ?? "",
-      lastContactedAt: prefs?.lastContactedAt ?? null,
-      interactionDates: interactionsByCustomer.get(c.id) ?? [],
-      distinctProjectsCount: distinctProjectsByCustomer.get(c.id)?.size ?? 0,
-      inferredBudgetMin: inference?.inferredBudgetMin ?? undefined,
-      inferredBudgetMax: inference?.inferredBudgetMax ?? undefined,
-      inferredLocations: inference?.inferredLocations ?? undefined,
-      inferredBedrooms: inference?.inferredBedrooms ?? undefined,
-      inferredPropertyTypes: inference?.inferredPropertyTypes ?? undefined,
-      inferredPurpose: (inference?.inferredPurpose as MatchCustomerInput["purpose"]) ?? undefined,
-      inferredPaymentPreferences: inference?.inferredPaymentPreferences ?? undefined,
-      inferredObjections: inference?.inferredObjections ?? undefined,
-      inferredDeveloperPreferences: inference?.inferredDeveloperPreferences ?? undefined,
-      inferredPurchaseReadiness: (inference?.inferredPurchaseReadiness as MatchCustomerInput["purchaseReadiness"]) ?? undefined,
-    };
+    const input = buildMatchCustomerInput(
+      c,
+      prefsByCustomer.get(c.id),
+      inferByCustomer.get(c.id),
+      interactionsByCustomer.get(c.id) ?? [],
+      distinctProjectsByCustomer.get(c.id)?.size ?? 0,
+      liveSignalsByCustomer.get(c.id) ?? []
+    );
     const result = scoreMatch(input, projectInput, now);
     if (!result.excluded && result.bucket !== "none") {
       results.push({ customer: c, result });
@@ -209,6 +192,108 @@ export async function runMatchingForProject(projectId: string, orgId: string, ac
   });
 
   return { analyzed: eligible.length, hot, warm, possible, potentialBuyerValue, currency: project.currency };
+}
+
+// ---------------------------------------------------------------------------
+// Shared customer -> MatchCustomerInput builder — used both by the full per-project batch
+// run above and by the single-customer outcome-loop rescore below, so the two code paths can
+// never drift on how the stated/inferred/live layers get merged into what scoreMatch() sees.
+// ---------------------------------------------------------------------------
+
+/** Reduces a customer's live-signal history down to the values scoreMatch() actually wants:
+ *  latest wins for budget and readiness (a point-in-time state), but every location an agent has
+ *  ever reported is kept — an extra candidate location only broadens recall, it never hurts. */
+function reduceLiveSignals(signals: (typeof schema.customerLiveSignals.$inferSelect)[]): {
+  liveBudgetMin: number | null | undefined;
+  liveBudgetMax: number | null | undefined;
+  liveLocations: string[];
+  livePurchaseReadiness: MatchCustomerInput["purchaseReadiness"] | undefined;
+} {
+  const sorted = [...signals].sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
+  let liveBudgetMin: number | null | undefined;
+  let liveBudgetMax: number | null | undefined;
+  let livePurchaseReadiness: MatchCustomerInput["purchaseReadiness"] | undefined;
+  const liveLocations: string[] = [];
+
+  for (const s of sorted) {
+    const v = s.structuredValueJson as Record<string, unknown>;
+    if (s.field === "budget") {
+      if (typeof v.min === "number" || v.min === null) liveBudgetMin = v.min as number | null;
+      if (typeof v.max === "number" || v.max === null) liveBudgetMax = v.max as number | null;
+    } else if (s.field === "location" && Array.isArray(v.locations)) {
+      for (const loc of v.locations) if (typeof loc === "string" && loc && !liveLocations.includes(loc)) liveLocations.push(loc);
+    } else if (s.field === "readiness" && typeof v.readiness === "string") {
+      livePurchaseReadiness = v.readiness as MatchCustomerInput["purchaseReadiness"];
+    }
+  }
+
+  return { liveBudgetMin, liveBudgetMax, liveLocations, livePurchaseReadiness };
+}
+
+function buildMatchCustomerInput(
+  customer: typeof schema.customers.$inferSelect,
+  prefs: typeof schema.customerPreferences.$inferSelect | undefined,
+  inference: typeof schema.customerInferences.$inferSelect | undefined,
+  interactionDates: Date[],
+  distinctProjectsCount: number,
+  liveSignals: (typeof schema.customerLiveSignals.$inferSelect)[]
+): MatchCustomerInput {
+  const live = reduceLiveSignals(liveSignals);
+  return {
+    id: customer.id,
+    doNotContact: customer.doNotContact,
+    status: customer.status,
+    budgetMin: prefs?.budgetMin ?? null,
+    budgetMax: prefs?.budgetMax ?? null,
+    budgetCurrency: prefs?.budgetCurrency ?? "AED",
+    preferredLocations: prefs?.preferredLocations ?? [],
+    preferredDevelopers: prefs?.preferredDevelopers ?? [],
+    bedrooms: prefs?.bedrooms ?? [],
+    propertyTypes: prefs?.propertyTypes ?? [],
+    purpose: (prefs?.purpose as MatchCustomerInput["purpose"]) ?? "unclear",
+    paymentPlanPreference: prefs?.paymentPlanPreference ?? "",
+    readyOrOffplanPreference: (prefs?.readyOrOffplanPreference as MatchCustomerInput["readyOrOffplanPreference"]) ?? "either",
+    purchaseReadiness: (prefs?.purchaseReadiness as MatchCustomerInput["purchaseReadiness"]) ?? "unknown",
+    lostReason: prefs?.lostReason ?? "",
+    lastContactedAt: prefs?.lastContactedAt ?? null,
+    interactionDates,
+    distinctProjectsCount,
+    inferredBudgetMin: inference?.inferredBudgetMin ?? undefined,
+    inferredBudgetMax: inference?.inferredBudgetMax ?? undefined,
+    inferredLocations: inference?.inferredLocations ?? undefined,
+    inferredBedrooms: inference?.inferredBedrooms ?? undefined,
+    inferredPropertyTypes: inference?.inferredPropertyTypes ?? undefined,
+    inferredPurpose: (inference?.inferredPurpose as MatchCustomerInput["purpose"]) ?? undefined,
+    inferredPaymentPreferences: inference?.inferredPaymentPreferences ?? undefined,
+    inferredObjections: inference?.inferredObjections ?? undefined,
+    inferredDeveloperPreferences: inference?.inferredDeveloperPreferences ?? undefined,
+    inferredPurchaseReadiness: (inference?.inferredPurchaseReadiness as MatchCustomerInput["purchaseReadiness"]) ?? undefined,
+    liveBudgetMin: live.liveBudgetMin,
+    liveBudgetMax: live.liveBudgetMax,
+    liveLocations: live.liveLocations,
+    livePurchaseReadiness: live.livePurchaseReadiness,
+  };
+}
+
+/** Same MatchProjectInput shape runMatchingForProject and rescoreCustomerAcrossActiveProjects
+ *  each built inline — extracted so the new single-project lookup in ensureMatchRow (below)
+ *  doesn't become a third copy that can drift from the other two. */
+function buildMatchProjectInput(project: typeof schema.projects.$inferSelect, unitTypeLabels: string[]): MatchProjectInput {
+  return {
+    id: project.id,
+    developer: project.developer,
+    location: project.location,
+    nearbyAreas: project.nearbyAreas,
+    bedroomTypes: unitTypeLabels.length ? unitTypeLabels : project.bedroomTypes,
+    propertyTypes: project.propertyTypes,
+    startingPrice: project.startingPrice,
+    maxPrice: project.maxPrice,
+    currency: project.currency,
+    constructionStatus: project.constructionStatus,
+    targetBuyerType: project.targetBuyerType,
+    paymentPlanSummary: project.paymentPlanSummary,
+    downPaymentPercent: project.downPaymentPercent,
+  };
 }
 
 function bucketForScore(score: number): "hot" | "warm" | "possible" | "none" {
@@ -420,15 +505,286 @@ export async function getMatchCounts(projectId: string) {
   return counts;
 }
 
-export async function updateMatchOutcome(matchId: string, orgId: string, outcomeStatus: string) {
+// ---------------------------------------------------------------------------
+// The outcome loop (product spec §6/§7) — 7 buttons, not a CRM pipeline. Three
+// (Interested/Not Interested/No Response) just record what happened. Four
+// (Not Now/Budget Changed/Different Location/Bought Elsewhere) change what we actually know
+// about the buyer, so they also feed the "Living Buyer Profile" and trigger an immediate,
+// narrowly-scoped rescore — this customer against this org's active projects, nothing wider.
+// ---------------------------------------------------------------------------
+
+const INTELLIGENCE_CHANGING_OUTCOMES = new Set(["not_now", "budget_changed", "different_location", "bought_elsewhere"]);
+const FOLLOWUP_OUTCOMES = new Set<FollowupOutcome>(["not_now", "budget_changed", "different_location"]);
+
+export interface RecordOutcomeResult {
+  outcomeStatus: string;
+  rescored: boolean;
+}
+
+export async function recordMatchOutcome(
+  matchId: string,
+  orgId: string,
+  outcomeStatus: string,
+  rawAnswer?: string
+): Promise<RecordOutcomeResult> {
   const match = await db.query.projectMatches.findFirst({ where: eq(schema.projectMatches.id, matchId) });
-  if (!match) return;
-  const project = await db.query.projects.findFirst({ where: and(eq(schema.projects.id, match.projectId), eq(schema.projects.orgId, orgId)) });
-  if (!project) return;
+  if (!match) return { outcomeStatus, rescored: false };
+  const [project, customer] = await Promise.all([
+    db.query.projects.findFirst({ where: and(eq(schema.projects.id, match.projectId), eq(schema.projects.orgId, orgId)) }),
+    db.query.customers.findFirst({ where: and(eq(schema.customers.id, match.customerId), eq(schema.customers.orgId, orgId)) }),
+  ]);
+  if (!project || !customer) return { outcomeStatus, rescored: false };
+
   await db
     .update(schema.projectMatches)
     .set({ outcomeStatus: outcomeStatus as (typeof schema.projectMatches.$inferInsert)["outcomeStatus"], outcomeUpdatedAt: new Date() })
     .where(eq(schema.projectMatches.id, matchId));
+
+  // Always log a timeline entry — feeds recency scoring and keeps a human-readable record of
+  // every contact, even for the three outcomes with no follow-up question.
+  await db.insert(schema.customerInteractions).values({
+    id: newId("interaction"),
+    customerId: customer.id,
+    channel: "status_change",
+    summary: `Outcome logged: ${outcomeStatus.replace(/_/g, " ")}${rawAnswer?.trim() ? ` — "${rawAnswer.trim()}"` : ""}`,
+    rawNote: rawAnswer?.trim() ?? "",
+    projectMentioned: project.name,
+  });
+
+  // Bought Elsewhere: hard-exclude this customer from every project org-wide, immediately —
+  // not just this one match. score.ts already treats "lost_elsewhere" the same as won/invalid.
+  if (outcomeStatus === "bought_elsewhere") {
+    await db.update(schema.customers).set({ status: "lost_elsewhere", updatedAt: new Date() }).where(eq(schema.customers.id, customer.id));
+  }
+
+  // The three follow-up outcomes: interpret the agent's own-words answer (AI first, deterministic
+  // parser fallback — see interpretOutcomeFollowup) and record it as a live signal so it outranks
+  // stale stated/AI-inferred data in every future score. If nothing structured comes out of it,
+  // the raw answer is still safely preserved in the interaction logged above — never lost either way.
+  if (FOLLOWUP_OUTCOMES.has(outcomeStatus as FollowupOutcome) && rawAnswer?.trim()) {
+    const prefs = await db.query.customerPreferences.findFirst({ where: eq(schema.customerPreferences.customerId, customer.id) });
+    const interpreted = await interpretOutcomeFollowup({
+      outcomeStatus: outcomeStatus as FollowupOutcome,
+      rawAnswer: rawAnswer.trim(),
+      currentBudgetMin: prefs?.budgetMin ?? null,
+      currentBudgetMax: prefs?.budgetMax ?? null,
+      currentCurrency: prefs?.budgetCurrency ?? "AED",
+    });
+    if (Object.keys(interpreted.structuredValue).length > 0) {
+      await db.insert(schema.customerLiveSignals).values({
+        id: newId("live"),
+        customerId: customer.id,
+        matchId,
+        outcomeStatus,
+        field: interpreted.field,
+        rawAnswer: rawAnswer.trim(),
+        structuredValueJson: interpreted.structuredValue,
+        interpretedBy: interpreted.interpretedBy,
+        confidence: interpreted.confidence,
+      });
+    }
+  }
+
+  let rescored = false;
+  if (INTELLIGENCE_CHANGING_OUTCOMES.has(outcomeStatus)) {
+    await rescoreCustomerAcrossActiveProjects(customer.id, orgId);
+    rescored = true;
+  }
+
+  return { outcomeStatus, rescored };
+}
+
+interface CustomerProjectScore {
+  project: typeof schema.projects.$inferSelect;
+  result: ReturnType<typeof scoreMatch>;
+  existingMatchId: string | undefined;
+  existingOutcomeStatus: string | undefined;
+}
+
+/** Read-only core shared by the outcome-loop rescore below and the buyer-facing "Buyer -> Find
+ *  Projects" reverse-match view (product spec §10 — the matching engine already worked in one
+ *  direction, project -> buyers; this is the same scoreMatch() call run the other way, one
+ *  customer against every ACTIVE project in the org). No AI call, no writes — safe to call from
+ *  a page render. Returns every active project scored, unfiltered (including excluded/"none"
+ *  ones), so each caller decides what to do with that: the rescorer needs to know about a
+ *  newly-"none" project so it can delete a stale row; the buyer-page view just filters those out. */
+async function computeCustomerProjectScores(customerId: string, orgId: string): Promise<CustomerProjectScore[]> {
+  const customer = await db.query.customers.findFirst({ where: and(eq(schema.customers.id, customerId), eq(schema.customers.orgId, orgId)) });
+  if (!customer) return [];
+
+  const activeProjects = await db.query.projects.findMany({ where: and(eq(schema.projects.orgId, orgId), eq(schema.projects.status, "active")) });
+  if (activeProjects.length === 0) return [];
+
+  const projectIds = activeProjects.map((p) => p.id);
+  const [prefs, inference, interactions, liveSignals, unitTypesAll, existingMatches] = await Promise.all([
+    db.query.customerPreferences.findFirst({ where: eq(schema.customerPreferences.customerId, customerId) }),
+    db.query.customerInferences.findFirst({ where: eq(schema.customerInferences.customerId, customerId) }),
+    db.query.customerInteractions.findMany({ where: eq(schema.customerInteractions.customerId, customerId) }),
+    db.query.customerLiveSignals.findMany({ where: eq(schema.customerLiveSignals.customerId, customerId) }),
+    db.query.projectUnitTypes.findMany({ where: inArray(schema.projectUnitTypes.projectId, projectIds) }),
+    db.query.projectMatches.findMany({ where: and(eq(schema.projectMatches.customerId, customerId), inArray(schema.projectMatches.projectId, projectIds)) }),
+  ]);
+
+  const interactionDates = interactions.map((i) => i.occurredAt);
+  const distinctProjectsCount = new Set(interactions.map((i) => i.projectMentioned?.toLowerCase()).filter(Boolean)).size;
+  const customerInput = buildMatchCustomerInput(customer, prefs ?? undefined, inference ?? undefined, interactionDates, distinctProjectsCount, liveSignals);
+
+  const unitTypesByProject = new Map<string, string[]>();
+  for (const u of unitTypesAll) {
+    if (!unitTypesByProject.has(u.projectId)) unitTypesByProject.set(u.projectId, []);
+    unitTypesByProject.get(u.projectId)!.push(u.typeLabel);
+  }
+  const existingByProject = new Map(existingMatches.map((m) => [m.projectId, m]));
+
+  const now = new Date();
+  return activeProjects.map((project) => {
+    const projectInput = buildMatchProjectInput(project, unitTypesByProject.get(project.id) ?? []);
+    const result = scoreMatch(customerInput, projectInput, now);
+    const existing = existingByProject.get(project.id);
+    return { project, result, existingMatchId: existing?.id, existingOutcomeStatus: existing?.outcomeStatus };
+  });
+}
+
+/** Re-runs the deterministic matching engine for ONE customer against every ACTIVE project in
+ *  the org — not the whole project's customer base, and no AI call. Cheap enough to run inline
+ *  right after an outcome is logged, so "Contact Today" and every project's match list reflect
+ *  what was just learned immediately, without waiting for the next full project re-analyze. */
+export async function rescoreCustomerAcrossActiveProjects(customerId: string, orgId: string): Promise<void> {
+  const scores = await computeCustomerProjectScores(customerId, orgId);
+  const now = new Date();
+
+  for (const { project, result, existingMatchId } of scores) {
+    if (result.excluded || result.bucket === "none") {
+      // No longer a viable match — remove any existing row (cascades to its reasons/evidence) so
+      // it stops showing up as a stale hot/warm match anywhere. Rows are only ever persisted for
+      // hot/warm/possible buckets, matching the invariant the full per-project batch run uses.
+      if (existingMatchId) await db.delete(schema.projectMatches).where(eq(schema.projectMatches.id, existingMatchId));
+      continue;
+    }
+
+    const matchId = existingMatchId ?? newId("match");
+    if (existingMatchId) {
+      await db
+        .update(schema.projectMatches)
+        .set({ totalScore: result.totalScore, bucket: result.bucket, scoreBreakdownJson: result.breakdown, concernsJson: result.concerns, computedAt: now })
+        .where(eq(schema.projectMatches.id, matchId));
+    } else {
+      await db.insert(schema.projectMatches).values({
+        id: matchId,
+        projectId: project.id,
+        customerId,
+        totalScore: result.totalScore,
+        bucket: result.bucket,
+        scoreBreakdownJson: result.breakdown,
+        concernsJson: result.concerns,
+        explanationSource: "template",
+      });
+    }
+
+    // Refresh template reasons — deterministic and instant, so this stays cheap enough to run
+    // synchronously right after an outcome tap. A polished AI explanation pass still happens
+    // whenever the project is next fully re-analyzed via "Find Potential Buyers".
+    await db.delete(schema.matchReasons).where(eq(schema.matchReasons.matchId, matchId));
+    const reasonRows = [
+      ...result.positives.map((text, i) => ({ id: newId("reason"), matchId, type: "positive" as const, text, weight: 1, sortOrder: i })),
+      ...result.concerns.map((text, i) => ({ id: newId("reason"), matchId, type: "concern" as const, text, weight: 1, sortOrder: i })),
+    ];
+    if (reasonRows.length > 0) await db.insert(schema.matchReasons).values(reasonRows);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// "Buyer -> Find Projects" — the reverse direction (product spec §10). The forward direction
+// (Project -> Find Buyers) is runMatchingForProject/getMatchResults above; this is the same
+// scoreMatch() engine run the other way for a single buyer's profile page, read-only and
+// uncached — realistic org sizes are single-digit-to-dozens of active projects, cheap enough to
+// compute fresh on every page view rather than adding another cache-invalidation surface.
+// ---------------------------------------------------------------------------
+
+export interface BestProjectMatch {
+  /** Opaque id handed to OutcomeButtons/logBuyerProjectOutcomeAction — NOT always a real
+   *  projectMatches.id. If this buyer has never been scored against this project before (no
+   *  persisted row), it's a "customerId::projectId" composite key instead; the action resolves
+   *  either form via ensureMatchRow so logging an outcome always has somewhere real to write. */
+  matchId: string;
+  projectId: string;
+  projectName: string;
+  projectLocation: string;
+  totalScore: number;
+  bucket: "hot" | "warm" | "possible";
+  breakdown: Record<string, { score: number; max: number }>;
+  positives: string[];
+  concerns: string[];
+  outcomeStatus: string;
+}
+
+export async function getBestProjectMatchesForCustomer(customerId: string, orgId: string, limit = 5): Promise<BestProjectMatch[]> {
+  const scores = await computeCustomerProjectScores(customerId, orgId);
+  return scores
+    .filter((s) => !s.result.excluded && s.result.bucket !== "none")
+    .sort((a, b) => b.result.totalScore - a.result.totalScore)
+    .slice(0, limit)
+    .map((s) => ({
+      matchId: s.existingMatchId ?? `${customerId}::${s.project.id}`,
+      projectId: s.project.id,
+      projectName: s.project.name,
+      projectLocation: s.project.location,
+      totalScore: s.result.totalScore,
+      bucket: s.result.bucket as "hot" | "warm" | "possible",
+      breakdown: s.result.breakdown,
+      positives: s.result.positives,
+      concerns: s.result.concerns,
+      outcomeStatus: s.existingOutcomeStatus ?? "not_contacted",
+    }));
+}
+
+/** Finds this (customer, project) pair's persisted match row, or creates one on the spot if the
+ *  pair has never been scored/persisted before. Used when an outcome is logged from the buyer
+ *  profile's reverse-match view, where a shown project may not have a projectMatches row yet
+ *  (getBestProjectMatchesForCustomer computes scores live without persisting them) — the agent
+ *  is recording a real interaction, so it needs somewhere durable to attach that outcome to. */
+export async function ensureMatchRow(customerId: string, projectId: string, orgId: string): Promise<string | null> {
+  const existing = await db.query.projectMatches.findFirst({
+    where: and(eq(schema.projectMatches.customerId, customerId), eq(schema.projectMatches.projectId, projectId)),
+  });
+  if (existing) return existing.id;
+
+  const [customer, project] = await Promise.all([
+    db.query.customers.findFirst({ where: and(eq(schema.customers.id, customerId), eq(schema.customers.orgId, orgId)) }),
+    db.query.projects.findFirst({ where: and(eq(schema.projects.id, projectId), eq(schema.projects.orgId, orgId)) }),
+  ]);
+  if (!customer || !project) return null;
+
+  const [prefs, inference, interactions, liveSignals, unitTypes] = await Promise.all([
+    db.query.customerPreferences.findFirst({ where: eq(schema.customerPreferences.customerId, customerId) }),
+    db.query.customerInferences.findFirst({ where: eq(schema.customerInferences.customerId, customerId) }),
+    db.query.customerInteractions.findMany({ where: eq(schema.customerInteractions.customerId, customerId) }),
+    db.query.customerLiveSignals.findMany({ where: eq(schema.customerLiveSignals.customerId, customerId) }),
+    db.query.projectUnitTypes.findMany({ where: eq(schema.projectUnitTypes.projectId, projectId) }),
+  ]);
+  const interactionDates = interactions.map((i) => i.occurredAt);
+  const distinctProjectsCount = new Set(interactions.map((i) => i.projectMentioned?.toLowerCase()).filter(Boolean)).size;
+  const customerInput = buildMatchCustomerInput(customer, prefs ?? undefined, inference ?? undefined, interactionDates, distinctProjectsCount, liveSignals);
+  const projectInput = buildMatchProjectInput(project, unitTypes.map((u) => u.typeLabel));
+  const result = scoreMatch(customerInput, projectInput, new Date());
+
+  const matchId = newId("match");
+  await db.insert(schema.projectMatches).values({
+    id: matchId,
+    projectId,
+    customerId,
+    totalScore: result.totalScore,
+    bucket: result.bucket,
+    scoreBreakdownJson: result.breakdown,
+    concernsJson: result.concerns,
+    explanationSource: "template",
+  });
+  const reasonRows = [
+    ...result.positives.map((text, i) => ({ id: newId("reason"), matchId, type: "positive" as const, text, weight: 1, sortOrder: i })),
+    ...result.concerns.map((text, i) => ({ id: newId("reason"), matchId, type: "concern" as const, text, weight: 1, sortOrder: i })),
+  ];
+  if (reasonRows.length > 0) await db.insert(schema.matchReasons).values(reasonRows);
+  return matchId;
 }
 
 // ---------------------------------------------------------------------------

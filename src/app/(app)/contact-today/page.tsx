@@ -1,8 +1,8 @@
-import Link from "next/link";
 import { PhoneCall } from "lucide-react";
 import { requireSession } from "@/lib/auth/requireSession";
 import { getTodaysReactivationOpportunities } from "@/db/repoMatching";
 import EmptyState from "@/components/ui/EmptyState";
+import OpportunityRow from "./OpportunityRow";
 
 export default async function ContactTodayPage() {
   const session = await requireSession();
@@ -25,18 +25,16 @@ export default async function ContactTodayPage() {
       ) : (
         <div className="flex flex-col gap-2.5">
           {opportunities.map((o, i) => (
-            <Link key={o.matchId} href={`/projects/${o.projectId}/matches`} className="card-surface-interactive p-4 flex items-center gap-4">
-              <span className="w-8 h-8 rounded-full bg-brand-cream flex items-center justify-center text-sm font-semibold text-brand-primary shrink-0">
-                {i + 1}
-              </span>
-              <div className="flex-1 min-w-0">
-                <p className="font-medium text-sm">
-                  {o.customerName} <span className="text-brand-muted font-normal">→ {o.projectName}</span>
-                </p>
-                {o.reason && <p className="text-xs text-brand-muted mt-0.5 truncate">{o.reason}</p>}
-              </div>
-              <span className="text-sm font-semibold text-brand-primary shrink-0">{o.score}</span>
-            </Link>
+            <OpportunityRow
+              key={o.matchId}
+              index={i}
+              matchId={o.matchId}
+              projectId={o.projectId}
+              customerName={o.customerName}
+              projectName={o.projectName}
+              reason={o.reason}
+              score={o.score}
+            />
           ))}
         </div>
       )}

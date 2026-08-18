@@ -57,6 +57,52 @@ describe("scoreMatch — hard exclusions", () => {
     const result = scoreMatch(baseCustomer({ status: "won" }), baseProject(), NOW);
     expect(result.excluded).toBe(true);
   });
+
+  it("excludes customers who bought elsewhere (outcome loop's 'Bought Elsewhere')", () => {
+    const result = scoreMatch(baseCustomer({ status: "lost_elsewhere" }), baseProject(), NOW);
+    expect(result.excluded).toBe(true);
+    expect(result.excludeReason).toMatch(/bought a property elsewhere/i);
+  });
+});
+
+describe("scoreMatch — live outcome-loop signals take precedence", () => {
+  it("uses the live budget over stale stated/inferred budgets", () => {
+    // Stated budget is far too low for this project; the live signal (from a "Budget Changed"
+    // outcome) says they can now afford it — the live value should win.
+    const customer = baseCustomer({
+      budgetMin: 200_000,
+      budgetMax: 300_000,
+      inferredBudgetMin: 250_000,
+      inferredBudgetMax: 350_000,
+      liveBudgetMin: 900_000,
+      liveBudgetMax: 1_100_000,
+    });
+    const result = scoreMatch(customer, baseProject({ startingPrice: 900_000, maxPrice: 1_100_000 }), NOW);
+    expect(result.breakdown.budget.score).toBeGreaterThan(0.7 * result.breakdown.budget.max);
+  });
+
+  it("adds the live location to the candidate set alongside stated/inferred locations", () => {
+    const customer = baseCustomer({
+      preferredLocations: ["Sobha Hartland"],
+      liveLocations: ["Dubai South"],
+    });
+    const result = scoreMatch(customer, baseProject({ location: "Dubai South", nearbyAreas: [] }), NOW);
+    expect(result.breakdown.location.score).toBe(result.breakdown.location.max);
+  });
+
+  it("uses live purchase readiness over stated/inferred readiness", () => {
+    const stale = scoreMatch(
+      baseCustomer({ purchaseReadiness: "cold", lastContactedAt: new Date("2026-08-01") }),
+      baseProject(),
+      NOW
+    );
+    const refreshed = scoreMatch(
+      baseCustomer({ purchaseReadiness: "cold", livePurchaseReadiness: "immediate", lastContactedAt: new Date("2026-08-01") }),
+      baseProject(),
+      NOW
+    );
+    expect(refreshed.breakdown.timeline.score).toBeGreaterThan(stale.breakdown.timeline.score);
+  });
 });
 
 describe("scoreMatch — the spec's Rahul-style scenario", () => {

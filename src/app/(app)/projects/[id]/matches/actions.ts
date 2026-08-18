@@ -1,12 +1,11 @@
 "use server";
 
 import { requireSession } from "@/lib/auth/requireSession";
-import { updateMatchOutcome } from "@/db/repoMatching";
-import { generateOutreachForMatch } from "@/db/repoMatching";
+import { recordMatchOutcome, generateOutreachForMatch, type RecordOutcomeResult } from "@/db/repoMatching";
 
-export async function updateOutcomeAction(matchId: string, outcomeStatus: string): Promise<void> {
+export async function updateOutcomeAction(matchId: string, outcomeStatus: string, rawAnswer?: string): Promise<RecordOutcomeResult> {
   const session = await requireSession();
-  await updateMatchOutcome(matchId, session.orgId, outcomeStatus);
+  return recordMatchOutcome(matchId, session.orgId, outcomeStatus, rawAnswer);
 }
 
 export async function generateOutreachAction(matchId: string) {
