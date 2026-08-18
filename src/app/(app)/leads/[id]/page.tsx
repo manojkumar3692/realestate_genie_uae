@@ -2,7 +2,9 @@ import { notFound } from "next/navigation";
 import { Phone, Mail, Globe, Clock, Sparkles } from "lucide-react";
 import { requireSession } from "@/lib/auth/requireSession";
 import { getCustomerDetail } from "@/db/repo";
+import { getBestProjectMatchesForCustomer } from "@/db/repoMatching";
 import { formatMoney } from "@/lib/normalize/budget";
+import BestOptions from "./BestOptions";
 import type * as schema from "@/db/schema";
 
 type PreferencesRow = typeof schema.customerPreferences.$inferSelect;
@@ -16,6 +18,7 @@ export default async function CustomerDetailPage({ params }: { params: Promise<{
 
   const { customer, preferences, inferences, interactions, sourceRecords } = detail;
   const sources = Array.from(new Set(sourceRecords.map((s) => s.rawSourceText).filter(Boolean)));
+  const bestMatches = await getBestProjectMatchesForCustomer(customer.id, session.orgId);
 
   return (
     <div className="max-w-4xl mx-auto px-4 md:px-6 py-8 md:py-12 flex flex-col gap-6">
@@ -53,6 +56,8 @@ export default async function CustomerDetailPage({ params }: { params: Promise<{
           <p className="text-sm leading-relaxed">{inferences.aiSummary}</p>
         </div>
       )}
+
+      <BestOptions matches={bestMatches} />
 
       <div className="grid md:grid-cols-2 gap-4">
         <ProfileCard title="Current Buyer Profile" fields={buildProfileFields(preferences, inferences)} />
